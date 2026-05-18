@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cyberclaw-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # Override storageClassName in overlay (e.g. gp3, managed-csi, standard).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cyberclaw-audit
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # Audit log is append-only — sized for ~3 months of moderate
+  # traffic. Backup via CronJob (see RB-11) before this fills up.

@@ -1,0 +1,114 @@
+apiVersion: cyberclaw.io/v1alpha1
+kind: Connector
+id: local
+version: 0.1.0
+name: LocalConnector
+displayName: Local File System and Command Connector
+summary: Provides file system, search, and command execution capabilities for local workspace
+owner: cyberclaw
+license: Apache-2.0
+homepage: https://cyberclaw.io
+repository: https://github.com/cyberclawlabs/cyberclaw
+tags:
+  - filesystem
+  - search
+  - command
+  - native
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+  os:
+    - linux
+    - macos
+    - windows
+  arch:
+    - x86_64
+    - aarch64
+dependencies: {}
+artifacts:
+  entry: local
+  files: []
+configSchema: null
+spec:
+  subtype: filesystem
+  runtime: native
+  auth: null
+  capabilities:
+    - id: fs.read
+      title: Read File
+      description: Read contents of a file within workspace
+      inputSchema: FsReadInput
+      outputSchema: FsReadOutput
+      risk: low
+      effects:
+        - read
+      placement:
+        local: {}
+      timeouts:
+        requestMs: 5000
+
+    - id: fs.write
+      title: Write File
+      description: Write contents to a file within workspace
+      inputSchema: FsWriteInput
+      outputSchema: FsWriteOutput
+      risk: medium
+      effects:
+        - write
+      placement:
+        local: {}
+      timeouts:
+        requestMs: 5000
+
+    - id: fs.edit
+      title: Edit File
+      description: Replace text in a file within workspace
+      inputSchema: FsEditInput
+      outputSchema: FsEditOutput
+      risk: medium
+      effects:
+        - write
+      placement:
+        local: {}
+      timeouts:
+        requestMs: 5000
+
+    - id: search.grep
+      title: Search with Grep
+      description: Search for pattern in files within workspace
+      inputSchema: SearchGrepInput
+      outputSchema: SearchGrepOutput
+      risk: low
+      effects:
+        - read
+      placement:
+        local: {}
+      timeouts:
+        requestMs: 10000
+
+    - id: search.glob
+      title: Search with Glob
+      description: Find files matching pattern within workspace
+      inputSchema: SearchGlobInput
+      outputSchema: SearchGlobOutput
+      risk: low
+      effects:
+        - read
+      placement:
+        local: {}
+      timeouts:
+        requestMs: 10000
+
+    - id: cmd.exec
+      title: Execute Command
+      description: Execute a shell command within workspace
+      inputSchema: CmdExecInput
+      outputSchema: CmdExecOutput
+      risk: high
+      effects:
+        - execute
+      placement:
+        local: {}
+      timeouts:
+        requestMs: 30000

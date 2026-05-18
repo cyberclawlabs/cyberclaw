@@ -1,0 +1,40 @@
+[package]
+name = "cyberclaw-scheduler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Time and scheduling
+chrono = { workspace = true }
+cron = "0.12"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# UUIDs
+uuid = { workspace = true }
+
+# CyberClaw dependencies
+cyberclaw-core = { workspace = true }
+cyberclaw-observability = { workspace = true }
+
+# Concurrent data structures
+dashmap = "5.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-subscriber = { workspace = true }

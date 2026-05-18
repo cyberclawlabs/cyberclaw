@@ -1,0 +1,45 @@
+apiVersion: cyberclaw.io/v2
+kind: Connector
+id: github
+version: 0.1.0
+name: github
+displayName: GitHub Connector
+summary: Connector for repository metadata, issues and pull request operations.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - repo
+  - developer
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - remote
+artifacts:
+  entry: manifest.yaml
+spec:
+  subtype: repo
+  runtime: remote
+  auth:
+    modes:
+      - oauth
+      - token
+    secretRefs:
+      - vault://connectors/github/token
+  capabilities:
+    - id: github.issue.create
+      title: Create GitHub issue
+      description: Create an issue in a target repository.
+      inputSchema: schemas/github.issue.create.input.json
+      outputSchema: schemas/github.issue.create.output.json
+      risk: medium
+      effects:
+        - write
+        - ticket
+    - id: github.pull_request.comment
+      title: Comment on pull request
+      description: Add a review comment to an existing pull request.
+      inputSchema: schemas/github.pull_request.comment.input.json
+      outputSchema: schemas/github.pull_request.comment.output.json
+      risk: low
+      effects:
+        - write

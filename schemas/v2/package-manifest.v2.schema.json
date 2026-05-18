@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyberclaw.io/package-manifest.v2.schema.json",
+  "type": "object",
+  "required": ["apiVersion", "kind", "id", "version", "name", "summary", "compatibility", "spec"],
+  "properties": {
+    "apiVersion": { "const": "cyberclaw.io/v2" },
+    "kind": {
+      "type": "string",
+      "enum": ["Agent", "Skill", "Connector", "PlatformPlugin"]
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-/]*$"
+    },
+    "version": { "type": "string" },
+    "name": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string" },
+    "summary": { "type": "string", "minLength": 1 },
+    "owner": { "type": "string" },
+    "license": { "type": "string" },
+    "homepage": { "type": "string" },
+    "repository": { "type": "string" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "compatibility": { "$ref": "#/$defs/compatibility" },
+    "dependencies": { "$ref": "#/$defs/dependencies" },
+    "artifacts": { "$ref": "#/$defs/artifacts" },
+    "configSchema": { "type": "string" },
+    "spec": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "Agent" }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": { "$ref": "agent-spec.v2.schema.json" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "Skill" }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": { "$ref": "skill-spec.v2.schema.json" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "Connector" }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": { "$ref": "connector-spec.v2.schema.json" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "PlatformPlugin" }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": { "$ref": "platform-plugin-spec.v2.schema.json" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "compatibility": {
+      "type": "object",
+      "required": ["platform"],
+      "properties": {
+        "platform": { "type": "string" },
+        "runtime": { "type": "array", "items": { "type": "string" } },
+        "os": { "type": "array", "items": { "type": "string" } },
+        "arch": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "dependencies": {
+      "type": "object",
+      "properties": {
+        "agents": { "$ref": "#/$defs/stringArray" },
+        "skills": { "$ref": "#/$defs/stringArray" },
+        "connectors": { "$ref": "#/$defs/stringArray" },
+        "plugins": { "$ref": "#/$defs/stringArray" },
+        "packages": { "$ref": "#/$defs/stringArray" }
+      },
+      "additionalProperties": false
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "entry": { "type": "string" },
+        "files": { "$ref": "#/$defs/stringArray" }
+      },
+      "additionalProperties": false
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

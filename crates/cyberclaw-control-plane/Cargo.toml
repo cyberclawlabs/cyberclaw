@@ -1,0 +1,45 @@
+[package]
+name = "cyberclaw-control-plane"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+scopeguard = "1.2"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+toml.workspace = true
+sha2 = "0.10"
+regex = "1.11"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio.workspace = true
+tokio-util = "0.7"
+tracing.workspace = true
+uuid = { version = "1.11", features = ["v4"] }
+cyberclaw-core.workspace = true
+cyberclaw-llm.workspace = true
+cyberclaw-observability = { path = "../cyberclaw-observability" }
+cyberclaw-agent-runtime = { path = "../cyberclaw-agent-runtime" }
+cyberclaw-skill-runtime = { path = "../cyberclaw-skill-runtime" }
+cyberclaw-connectors = { path = "../cyberclaw-connectors" }
+cyberclaw-governance = { path = "../cyberclaw-governance" }
+cyberclaw-plugin-runtime = { path = "../cyberclaw-plugin-runtime" }
+cyberclaw-store.workspace = true
+cyberclaw-memory-extraction = { path = "../cyberclaw-memory-extraction" }
+
+# Kanban dispatcher (R-07) — local SQLite board.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3.14"
+tokio = { version = "1.36", features = ["full", "test-util"] }
+loom = { workspace = true }
+futures.workspace = true
+cyberclaw-store = { workspace = true, features = ["sqlite"] }

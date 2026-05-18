@@ -1,0 +1,41 @@
+apiVersion: cyberclaw.io/v2
+kind: PlatformPlugin
+id: policy-enforcer
+version: 0.1.0
+name: policy-enforcer
+displayName: Policy Enforcer
+summary: >
+  Security-critical pre-execution hook that blocks capability calls that
+  violate a site-specific denylist. Uses failurePolicy abort so a hook
+  error is never silently ignored.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - security
+  - governance
+  - pre-execution
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: hooks/enforce_policy.sh
+  files:
+    - hooks/enforce_policy.sh
+spec:
+  runtime: native
+  hooks:
+    - event: execution.pre
+      phase: before
+      handler: hooks/enforce_policy.sh
+      # abort: hook failure blocks the capability call and surfaces an error.
+      # Use this for security-critical checks where silent continuation is
+      # never acceptable.
+      failurePolicy: abort
+  permissions:
+    audit.write: true
+    governance.read: true
+  env:
+    # Colon-separated list of capability IDs to deny unconditionally.
+    # Example: "cmd.exec:fs.write:web.fetch"
+    POLICY_ENFORCER_DENYLIST: ""

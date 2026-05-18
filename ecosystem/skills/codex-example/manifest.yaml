@@ -1,0 +1,10 @@
+name: Codex Example Skill
+version: 2.0.0
+description: Example skill demonstrating Codex format
+author: Codex Integration Team
+homepage: https://codex.example.com
+tags:
+  - example
+  - codex
+  - integration
+  - data-processing

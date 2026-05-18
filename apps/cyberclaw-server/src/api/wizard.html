@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CyberClaw Onboarding</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+  .muted { color: #888; font-size: 0.85rem; }
+  .card { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin: 1rem 0; }
+  label { display: block; margin: 0.5rem 0 0.25rem; font-weight: 600; }
+  input[type=text], input[type=password], select { width: 100%; padding: 0.5rem;
+    border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+  button { padding: 0.5rem 1rem; border: 0; border-radius: 4px; background: #2563eb;
+    color: white; font-weight: 600; cursor: pointer; }
+  button.secondary { background: #6b7280; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .log { background: #111; color: #eee; padding: 0.75rem; border-radius: 4px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem;
+    white-space: pre-wrap; max-height: 240px; overflow: auto; }
+  .done { color: #16a34a; font-weight: 600; }
+  .err  { color: #dc2626; font-weight: 600; }
+  .multi label { font-weight: 400; }
+  .multi input[type=checkbox] { margin-right: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>CyberClaw Onboarding</h1>
+<p class="muted">First-party onboarding wizard. This page drives <code>/wizard/*</code>
+routes. The wizard is unauthenticated in this MVP — bind the server to localhost for
+initial setup.</p>
+
+<div id="status" class="card">
+  <strong>Status:</strong> <span id="state">idle</span>
+  &nbsp;·&nbsp; <strong>Step:</strong> <span id="progress">—</span>
+</div>
+
+<div id="step-container" class="card" style="display:none;">
+  <div id="step-body"></div>
+  <div style="margin-top:0.75rem;">
+    <button id="submit-btn">Submit</button>
+    <button id="cancel-btn" class="secondary">Cancel</button>
+  </div>
+</div>
+
+<div id="start-container" class="card">
+  <p>Click <strong>Start</strong> to begin the onboarding flow.</p>
+  <button id="start-btn">Start</button>
+</div>
+
+<h2 style="font-size:1rem;margin-top:2rem;">Events</h2>
+<pre id="log" class="log">(no events yet)</pre>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  let sessionId = null;
+  let currentStep = null;
+  let eventSource = null;
+
+  // Bootstrap token: read from ?token=X URL param or sessionStorage, persist for session.
+  const urlToken = new URLSearchParams(location.search).get("token");
+  if (urlToken) sessionStorage.setItem("bootstrapToken", urlToken);
+  const BOOTSTRAP_TOKEN = sessionStorage.getItem("bootstrapToken") || "";
+
+  function authHeaders() {
+    return BOOTSTRAP_TOKEN ? { "X-Wizard-Bootstrap-Token": BOOTSTRAP_TOKEN } : {};
+  }
+
+  function log(msg) {
+    if (logEl.textContent === "(no events yet)") logEl.textContent = "";
+    const ts = new Date().toISOString().slice(11, 19);
+    logEl.textContent += `[${ts}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  async function postJson(path, body) {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) throw new Error(`${path} -> HTTP ${r.status}`);
+    return r.json();
+  }
+
+  function renderStep(step) {
+    const body = $("step-body");
+    body.innerHTML = "";
+    if (!step) { body.textContent = "No step."; return; }
+    const kind = step.type;
+    const label = document.createElement("label");
+    label.textContent = step.prompt || step.text || step.label || "(step)";
+    body.appendChild(label);
+
+    if (kind === "note") {
+      const p = document.createElement("p");
+      p.textContent = step.text;
+      body.appendChild(p);
+    } else if (kind === "select") {
+      const sel = document.createElement("select");
+      sel.id = "answer-input";
+      (step.options || []).forEach((opt, i) => {
+        const o = document.createElement("option");
+        o.value = String(i); o.textContent = opt;
+        if (step.default_idx === i) o.selected = true;
+        sel.appendChild(o);
+      });
+      body.appendChild(sel);
+    } else if (kind === "text") {
+      const inp = document.createElement("input");
+      inp.id = "answer-input";
+      inp.type = step.sensitive ? "password" : "text";
+      if (step.default) inp.value = step.default;
+      body.appendChild(inp);
+    } else if (kind === "confirm") {
+      const sel = document.createElement("select");
+      sel.id = "answer-input";
+      ["Yes", "No"].forEach((opt, i) => {
+        const o = document.createElement("option");
+        o.value = i === 0 ? "true" : "false"; o.textContent = opt;
+        if (step.default === (i === 0)) o.selected = true;
+        sel.appendChild(o);
+      });
+      body.appendChild(sel);
+    } else if (kind === "multi_select") {
+      const wrap = document.createElement("div");
+      wrap.className = "multi";
+      wrap.id = "answer-input";
+      (step.options || []).forEach((opt, i) => {
+        const lab = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.value = String(i); cb.name = "opt";
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(" " + opt));
+        wrap.appendChild(lab);
+      });
+      body.appendChild(wrap);
+    } else if (kind === "progress" || kind === "action") {
+      const p = document.createElement("p");
+      p.textContent = "Click Submit to acknowledge: " + (step.label || step.id);
+      body.appendChild(p);
+    }
+  }
+
+  function collectAnswer(step) {
+    if (!step) return { kind: "action_done" };
+    const kind = step.type;
+    if (kind === "note" || kind === "progress" || kind === "action") {
+      return { kind: "action_done" };
+    }
+    const el = $("answer-input");
+    if (kind === "select") {
+      return { kind: "selected_idx", value: Number(el.value) };
+    }
+    if (kind === "text") {
+      return { kind: "text", value: el.value };
+    }
+    if (kind === "confirm") {
+      return { kind: "confirm_bool", value: el.value === "true" };
+    }
+    if (kind === "multi_select") {
+      const checked = Array.from(el.querySelectorAll("input[name=opt]:checked"))
+        .map((c) => Number(c.value));
+      return { kind: "selected_set", value: checked };
+    }
+    return { kind: "action_done" };
+  }
+
+  function subscribeEvents(sid) {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource(`/wizard/events?session_id=${encodeURIComponent(sid)}`);
+    eventSource.onmessage = (m) => log("event: " + m.data);
+    eventSource.onerror = () => log("(sse closed)");
+  }
+
+  async function start() {
+    const r = await postJson("/wizard/start", {});
+    sessionId = r.session_id;
+    $("state").textContent = "running";
+    $("start-container").style.display = "none";
+    $("step-container").style.display = "block";
+    subscribeEvents(sessionId);
+    log(`started session=${sessionId}`);
+    await advance({ kind: "action_done" }, true);
+  }
+
+  async function advance(answer, isFirst) {
+    const body = isFirst ? { session_id: sessionId } : { session_id: sessionId, answer };
+    const r = await fetch("/wizard/next", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { log("next failed: HTTP " + r.status); return; }
+    const data = await r.json();
+    if (data.done) {
+      $("state").innerHTML = '<span class="done">done</span>';
+      $("step-container").style.display = "none";
+      $("progress").textContent = `${data.step_index}/${data.step_index}`;
+      log("wizard complete");
+      if (eventSource) eventSource.close();
+      return;
+    }
+    currentStep = data.step;
+    $("progress").textContent = `${data.step_index + 1}`;
+    renderStep(currentStep);
+  }
+
+  $("start-btn").onclick = () => start().catch((e) => log("err: " + e.message));
+  $("submit-btn").onclick = () => {
+    const ans = collectAnswer(currentStep);
+    advance(ans, false).catch((e) => log("err: " + e.message));
+  };
+  $("cancel-btn").onclick = async () => {
+    if (!sessionId) return;
+    try {
+      await postJson("/wizard/cancel", { session_id: sessionId });
+      $("state").innerHTML = '<span class="err">cancelled</span>';
+      $("step-container").style.display = "none";
+      if (eventSource) eventSource.close();
+      log("cancelled");
+    } catch (e) { log("err: " + e.message); }
+  };
+})();
+</script>
+</body>
+</html>

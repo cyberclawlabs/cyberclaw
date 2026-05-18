@@ -1,0 +1,35 @@
+[plugin]
+id = "example-plugin"
+name = "Example Plugin"
+version = "0.1.0"
+description = "An example CyberClaw plugin demonstrating hooks and capabilities"
+authors = ["CyberClaw Team <info@cyberclawlabs.ai>"]
+
+[plugin.library]
+path = "target/release/libexample_plugin.so"
+entry_point = "cyberclaw_plugin_init"
+
+[plugin.hooks]
+# Hook 配置
+before_execution = { handler = "before_exec_hook", priority = 100, timeout_ms = 5000 }
+after_execution = { handler = "after_exec_hook", priority = 100, timeout_ms = 5000 }
+on_failure = { handler = "on_failure_hook", priority = 50, timeout_ms = 3000 }
+on_review = { handler = "on_review_hook", priority = 75, timeout_ms = 5000 }
+
+[plugin.capabilities]
+# 需要的权限
+required = ["fs.read", "network.http", "env.read"]
+
+[plugin.resources]
+# 资源限制
+memory = 104857600  # 100 MB
+cpu_ms = 10000      # 10 seconds
+file_handles = 100
+network_connections = 10
+
+[plugin.metadata]
+homepage = "https://cyberclaw.io/plugins/example"
+repository = "https://github.com/cyberclawlabs/example-plugin"
+license = "Apache-2.0"
+keywords = ["example", "demo", "hooks"]
+categories = ["development", "testing"]

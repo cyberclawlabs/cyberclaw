@@ -1,0 +1,29 @@
+[package]
+name = "cyberclaw-governance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+cyberclaw-core.workspace = true
+cyberclaw-store.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+async-trait = "0.1"
+tokio.workspace = true
+chrono.workspace = true
+aho-corasick.workspace = true
+regex = "1.11"
+uuid.workspace = true
+tracing.workspace = true
+subtle = "2.6"
+unicode-normalization = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+proptest = "1.0"
+tempfile = "3.14"

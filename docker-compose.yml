@@ -1,0 +1,79 @@
+# ============================================
+# docker-compose.yml - 本地开发环境
+# ============================================
+# 用于本地开发和功能测试
+#
+# 使用方法：
+#   # 启动服务
+#   docker-compose up -d
+#
+#   # 查看日志
+#   docker-compose logs -f cyberclaw-server
+#
+#   # 停止并清理
+#   docker-compose down
+#
+# 必需环境变量（在 .env 文件或 shell 中设置）：
+#   JWT_SECRET      - JWT 签名密钥（至少 32 字符）
+#   LLM_API_KEY     - LLM 服务 API Key
+#
+# 可选环境变量：
+#   LLM_PROVIDER    - LLM 提供商（默认 openai）
+#   LLM_BASE_URL    - LLM API 基础 URL
+
+services:
+  cyberclaw-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 构建目标：使用 runtime 最终阶段
+      target: runtime
+    image: cyberclaw-server:dev
+    container_name: cyberclaw-server-dev
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      # LLM 配置
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+
+      # 安全配置（开发环境必须显式设置 JWT_SECRET）
+      - JWT_SECRET=${JWT_SECRET:-dev-insecure-secret-change-before-any-real-use}
+
+      # 服务器配置
+      - CYBERCLAW_ADDR=0.0.0.0:3000
+      - CYBERCLAW_TIMEOUT=30
+
+      # CORS（开发环境允许所有源）
+      - CYBERCLAW_CORS_ORIGINS=*
+
+      # 速率限制（开发环境放宽）
+      - RATE_LIMIT_PER_SECOND=10
+      - RATE_LIMIT_BURST_SIZE=100
+
+      # 日志级别
+      - RUST_LOG=info,cyberclaw=debug
+      - RUST_BACKTRACE=1
+
+      # 运行环境标识
+      - ENVIRONMENT=development
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+    # 开发环境：崩溃后自动重启
+    restart: unless-stopped
+
+    # 日志配置（开发环境保留完整日志）
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"

@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cyberclaw-server
+  annotations:
+    # cert-manager managed cert. Replace `letsencrypt-prod` with the
+    # ClusterIssuer your cluster uses.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx specifics — strip if using a different controller.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - cyberclaw.example.com  # ← change me per deployment
+      secretName: cyberclaw-tls
+  rules:
+    - host: cyberclaw.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cyberclaw-server
+                port:
+                  number: 80

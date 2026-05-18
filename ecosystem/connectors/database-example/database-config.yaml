@@ -1,0 +1,168 @@
+# Database Connector Configuration Example
+#
+# This file demonstrates how to configure the DatabaseConnector
+# for PostgreSQL, MySQL, and SQLite databases.
+
+connector:
+  id: "database"
+  name: "Database Connector"
+  version: "1.0.0"
+  description: "Multi-database connector supporting PostgreSQL, MySQL, and SQLite"
+
+# Database connections
+# You can register multiple database pools with different names
+databases:
+  # PostgreSQL example
+  - name: "postgres-main"
+    type: "postgresql"
+    url: "postgres://user:password@localhost:5432/production"
+    pool:
+      max_connections: 10
+      min_connections: 2
+      connection_timeout_ms: 5000
+      idle_timeout_ms: 300000
+
+  # MySQL example
+  - name: "mysql-analytics"
+    type: "mysql"
+    url: "mysql://user:password@localhost:3306/analytics"
+    pool:
+      max_connections: 5
+      min_connections: 1
+      connection_timeout_ms: 5000
+      idle_timeout_ms: 300000
+
+  # SQLite example (file-based)
+  - name: "sqlite-local"
+    type: "sqlite"
+    url: "sqlite://./data/local.db"
+    pool:
+      max_connections: 1
+      min_connections: 1
+      connection_timeout_ms: 5000
+      idle_timeout_ms: 300000
+
+  # SQLite example (in-memory for testing)
+  - name: "sqlite-memory"
+    type: "sqlite"
+    url: "sqlite::memory:"
+    pool:
+      max_connections: 1
+      min_connections: 1
+      connection_timeout_ms: 5000
+      idle_timeout_ms: 300000
+
+# Capabilities configuration
+capabilities:
+  db.query:
+    enabled: true
+    risk: "low"
+    timeout_ms: 30000
+    description: "Execute SELECT queries"
+
+  db.execute:
+    enabled: true
+    risk: "medium"
+    timeout_ms: 30000
+    description: "Execute INSERT/UPDATE/DELETE statements"
+
+  db.transaction:
+    enabled: true
+    risk: "high"
+    timeout_ms: 60000
+    description: "Execute multiple statements in a transaction"
+
+  db.migrate:
+    enabled: true
+    risk: "critical"
+    timeout_ms: 120000
+    description: "Run database migrations"
+    # Optional: restrict to specific databases
+    allowed_databases:
+      - "postgres-main"
+      - "mysql-analytics"
+
+# Security settings
+security:
+  # Require approval for high-risk operations
+  require_approval:
+    - "db.migrate"
+    - "db.transaction"
+
+  # SQL injection prevention
+  prevent_multiple_statements: false  # Set to true to disallow multiple statements in single query
+
+  # Audit logging
+  audit_all_queries: true
+  audit_slow_queries_ms: 1000  # Log queries slower than this
+
+  # Rate limiting
+  rate_limits:
+    queries_per_minute: 1000
+    transactions_per_minute: 100
+    migrations_per_hour: 10
+
+# Monitoring
+monitoring:
+  # Connection pool metrics
+  track_pool_stats: true
+
+  # Query metrics
+  track_query_stats: true
+  slow_query_threshold_ms: 1000
+
+  # Health checks
+  health_check_interval_ms: 30000
+  health_check_query: "SELECT 1"
+
+# Usage examples
+examples:
+  # Example 1: Simple query
+  - name: "Get all users"
+    capability: "db.query"
+    input:
+      database: "postgres-main"
+      sql: "SELECT id, name, email FROM users WHERE active = true ORDER BY created_at DESC LIMIT 10"
+
+  # Example 2: Execute statement
+  - name: "Insert new user"
+    capability: "db.execute"
+    input:
+      database: "postgres-main"
+      sql: "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
+
+  # Example 3: Transaction
+  - name: "Transfer funds"
+    capability: "db.transaction"
+    input:
+      database: "postgres-main"
+      statements:
+        - "UPDATE accounts SET balance = balance - 100 WHERE id = 1"
+        - "UPDATE accounts SET balance = balance + 100 WHERE id = 2"
+        - "INSERT INTO transfers (from_id, to_id, amount) VALUES (1, 2, 100)"
+
+  # Example 4: Migration
+  - name: "Create users table"
+    capability: "db.migrate"
+    input:
+      database: "postgres-main"
+      migrations:
+        - name: "001_create_users"
+          statements:
+            - "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT, email TEXT UNIQUE, created_at TIMESTAMP DEFAULT NOW())"
+            - "CREATE INDEX idx_users_email ON users(email)"
+        - name: "002_add_users_status"
+          statements:
+            - "ALTER TABLE users ADD COLUMN active BOOLEAN DEFAULT true"
+
+# Environment variables
+# These should be set in your environment or .env file:
+#
+# POSTGRES_URL=postgres://user:password@localhost:5432/production
+# MYSQL_URL=mysql://user:password@localhost:3306/analytics
+# SQLITE_URL=sqlite://./data/local.db
+#
+# For production, use secure credential management:
+# - AWS Secrets Manager
+# - HashiCorp Vault
+# - Environment-specific secrets

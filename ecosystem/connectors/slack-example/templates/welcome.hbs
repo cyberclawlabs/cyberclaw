@@ -1,0 +1,26 @@
+:wave: Welcome {{name}} to *{{channel}}*!
+
+We're excited to have you join our team. Here's what you need to know:
+
+{{#if onboarding_tasks}}
+*Your Onboarding Tasks:*
+{{#each onboarding_tasks}}
+{{@index}}. {{this.title}} - _{{this.description}}_
+{{/each}}
+{{/if}}
+
+{{#if team_members}}
+*Team Members:*
+{{#each team_members}}
+• {{this.name}} - {{this.role}}
+{{/each}}
+{{/if}}
+
+{{#if links}}
+*Useful Links:*
+{{#each links}}
+• <{{this.url}}|{{this.title}}>
+{{/each}}
+{{/if}}
+
+If you have any questions, feel free to ask in {{support_channel}} :raised_hands:

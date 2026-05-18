@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cyberclaw-server
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: cyberclaw-server
+          # Staging: lower resource ceiling — fits a t3.medium.
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

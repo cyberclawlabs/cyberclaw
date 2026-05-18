@@ -1,0 +1,169 @@
+# CyberClaw Cron Scheduler Configuration Example
+
+# 调度器配置
+[scheduler]
+# 检查间隔 (秒)
+check_interval_secs = 60
+# 最大并发执行数
+max_concurrent_executions = 10
+# 最大历史记录数
+max_history_records = 1000
+
+# 任务定义
+[[tasks]]
+id = "daily-database-backup"
+name = "Daily Database Backup"
+cron = "0 2 * * *"  # 每天凌晨 2:00
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "database"
+capability = "db.backup"
+
+[tasks.action.params]
+target = "/backup/daily"
+compress = true
+retention_days = 30
+exclude_tables = ["temp_*", "cache_*"]
+
+[[tasks]]
+id = "hourly-health-check"
+name = "Hourly Health Check"
+cron = "0 * * * *"  # 每小时整点
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "monitoring"
+capability = "health.check"
+
+[tasks.action.params]
+endpoints = [
+    "http://api.example.com/health",
+    "http://db.example.com/health",
+    "http://cache.example.com/health"
+]
+timeout_seconds = 30
+alert_on_failure = true
+
+[[tasks]]
+id = "sync-every-5-minutes"
+name = "State Sync Every 5 Minutes"
+cron = "*/5 * * * *"  # 每 5 分钟
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "sync"
+capability = "state.sync"
+
+[tasks.action.params]
+source = "local"
+target = "remote"
+incremental = true
+batch_size = 100
+
+[[tasks]]
+id = "weekly-report"
+name = "Weekly Report Generation"
+cron = "0 9 * * MON"  # 每周一上午 9:00
+enabled = true
+
+[tasks.action]
+type = "ExecuteAgent"
+agent_id = "reporter"
+task = "Generate and send weekly report with metrics, alerts, and recommendations"
+
+[[tasks]]
+id = "monthly-cleanup"
+name = "Monthly Data Cleanup"
+cron = "0 0 1 * *"  # 每月 1 号午夜
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "storage"
+capability = "cleanup.old_data"
+
+[tasks.action.params]
+retention_months = 6
+dry_run = false
+cleanup_types = ["logs", "temp_files", "expired_sessions"]
+
+[[tasks]]
+id = "log-rotation"
+name = "Log Rotation"
+cron = "0 0 * * *"  # 每天午夜
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "logging"
+capability = "log.rotate"
+
+[tasks.action.params]
+max_size_mb = 100
+max_files = 10
+compress = true
+
+[[tasks]]
+id = "cache-warmup"
+name = "Cache Warmup"
+cron = "0 6 * * *"  # 每天早上 6:00
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "cache"
+capability = "cache.warmup"
+
+[tasks.action.params]
+datasets = ["users", "products", "configs"]
+preload_percentage = 80
+
+[[tasks]]
+id = "ssl-cert-check"
+name = "SSL Certificate Expiration Check"
+cron = "0 8 * * *"  # 每天早上 8:00
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "security"
+capability = "ssl.check_expiration"
+
+[tasks.action.params]
+domains = [
+    "example.com",
+    "api.example.com",
+    "www.example.com"
+]
+alert_days_before = 30
+
+# 高级示例：复杂调度
+[[tasks]]
+id = "business-hours-monitor"
+name = "Business Hours Monitoring"
+cron = "*/15 9-17 * * MON-FRI"  # 工作日 9:00-17:00 每 15 分钟
+enabled = true
+
+[tasks.action]
+type = "ExecuteCapability"
+connector_id = "monitoring"
+capability = "business.monitor"
+
+[tasks.action.params]
+metrics = ["response_time", "error_rate", "user_count"]
+alert_threshold = 0.95
+
+[[tasks]]
+id = "weekend-maintenance"
+name = "Weekend Maintenance"
+cron = "0 2 * * SAT"  # 每周六凌晨 2:00
+enabled = true
+
+[tasks.action]
+type = "ExecuteAgent"
+agent_id = "maintenance"
+task = "Perform system maintenance including database optimization, index rebuilding, and cache clearing"

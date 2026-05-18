@@ -1,0 +1,36 @@
+apiVersion: cyberclaw.io/v2
+kind: Skill
+id: report-summary
+version: 0.1.0
+name: report-summary
+displayName: Report Summary
+summary: Claude/Codex-compatible skill for summary and report generation.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - reporting
+  - claude-compatible
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: SKILL.md
+  files:
+    - SKILL.md
+    - scripts/prepare_report.sh
+    - references/STYLE.md
+    - assets/report-template.md
+spec:
+  format: claude-compatible
+  entryFile: SKILL.md
+  scriptsDir: scripts
+  referencesDir: references
+  assetsDir: assets
+  suggestedAgents:
+    - cyberclaw/report-agent
+  requiredCapabilities:
+    - github.issue.create
+  suggestedConnectors:
+    - github
+  workflowTemplates: []

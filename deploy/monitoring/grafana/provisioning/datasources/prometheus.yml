@@ -1,0 +1,14 @@
+# Grafana auto-provisioned Prometheus datasource.
+# Loaded at startup via `GF_PATHS_PROVISIONING=/etc/grafana/provisioning`.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://cyberclaw-prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s
+      httpMethod: POST

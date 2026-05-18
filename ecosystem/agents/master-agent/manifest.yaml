@@ -1,0 +1,41 @@
+apiVersion: cyberclaw.io/v2
+kind: Agent
+id: cyberclaw/master-agent
+version: 0.1.0
+name: master-agent
+displayName: Master Agent
+summary: Root orchestrator agent responsible for task routing, execution fan-out and result aggregation.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - orchestrator
+  - built-in
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: AGENT.md
+  files:
+    - AGENT.md
+    - SYSTEM_PROMPT.md
+    - PERSONA.md
+    - POLICY.md
+    - MEMORY.md
+spec:
+  role: orchestrator
+  class: master
+  description: Coordinates task decomposition, subagent dispatch and result convergence.
+  systemPromptFile: SYSTEM_PROMPT.md
+  personaFile: PERSONA.md
+  policyFile: POLICY.md
+  memoryFile: MEMORY.md
+  defaultSkills:
+    - report-summary
+  defaultConnectors:
+    - github
+  spawnPolicy:
+    canSpawn: true
+    maxDepth: 3
+    allowedChildren:
+      - cyberclaw/report-agent

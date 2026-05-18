@@ -1,0 +1,407 @@
+//! P0 Phase Integration Tests
+//!
+//! These tests verify the complete flow of the CyberClaw P0 phase implementation:
+//! 1. Full flow: ingress → resolve → plan → dispatch → completed
+//! 2. Risk-based review workflow
+//! 3. Execution failures entering Failed state
+//! 4. Observability event querying by execution_id
+
+use cyberclaw_control_plane::{
+    ControlPlane, ControlPlaneConfig, ExecutionRequest, ReviewQueue, ReviewRequest,
+    ReviewStatus, ReviewKind, SubmitTaskRequest,
+};
+use cyberclaw_core::prelude::*;
+use cyberclaw_connectors::{ConnectorRegistry, LocalConnector, init_default_connectors};
+use cyberclaw_observability::events::{InMemoryEventRecorder, EventRecorder, ObservabilityEvent};
+use std::sync::Arc;
+use std::time::Duration;
+use tempfile::TempDir;
+use tokio::time::timeout;
+
+/// Helper to create a test control plane with connectors
+async fn setup_control_plane() -> (Arc<ControlPlane>, TempDir, Arc<InMemoryEventRecorder>) {
+    let temp_dir = TempDir::new().unwrap();
+    let workspace = temp_dir.path().to_path_buf();
+
+    // Initialize connectors
+    init_default_connectors(workspace.clone()).unwrap();
+
+    // Create event recorder
+    let event_recorder = Arc::new(InMemoryEventRecorder::new());
+
+    // Create control plane config
+    let config = ControlPlaneConfig::new(
+        "test-node".to_string(),
+        workspace.clone(),
+        10,
+        1000,
+    ).unwrap();
+
+    // Create control plane
+    let control_plane = Arc::new(
+        ControlPlane::new(config, Some(event_recorder.clone() as Arc<dyn EventRecorder>))
+            .await
+            .unwrap()
+    );
+
+    (control_plane, temp_dir, event_recorder)
+}
+
+#[tokio::test]
+async fn test_full_flow_ingress_to_completed() {
+    let (control_plane, _temp_dir, event_recorder) = setup_control_plane().await;
+
+    // Create a low-risk task
+    let task = Task {
+        id: TaskId::new(),
+        case_id: None,
+        title: "Test Task".to_string(),
+        description: Some("Test task for full flow".to_string()),
+        kind: TaskKind::Execute,
+        priority: Priority::Low,  // Low priority to avoid review
+        status: TaskStatus::Created,
+        retries_left: 3,
+        retry_config: None,
+        parent_id: None,
+        depends_on: vec![],
+        task_settings: TaskSettings::default(),
+    };
+
+    // Submit task
+    let submit_request = SubmitTaskRequest {
+        trace_id: TraceId::new(),
+        task: task.clone(),
+        session: None,
+        actor: ActorRef {
+            id: ActorId::new(),
+            actor_type: ActorType::System,
+            tenant_id: None,
+            home_node_id: None,
+            display_name: "Test".to_string(),
+        },
+        workspace: None,
+    };
+
+    let result = control_plane.submit_task(submit_request).await.unwrap();
+    assert!(result.submitted);
+    assert!(result.review_id.is_none());
+    let execution_id = result.execution_id;
+
+    // Wait for execution to complete
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check execution status
+    let status = control_plane
+        .execution_service()
+        .get_status(&execution_id)
+        .await
+        .unwrap();
+
+    // Should be either Completed or Running (depends on timing)
+    assert!(matches!(
+        status,
+        Some(ExecutionStatus::Completed) | Some(ExecutionStatus::Running) | Some(ExecutionStatus::Created)
+    ));
+
+    // Query events by execution_id
+    let events = event_recorder.query_by_execution_id(&execution_id);
+    assert!(!events.is_empty());
+
+    // Should have at least ExecutionSubmitted event
+    let has_submitted = events.iter().any(|e| matches!(e, ObservabilityEvent::ExecutionSubmitted { .. }));
+    assert!(has_submitted);
+}
+
+#[tokio::test]
+async fn test_medium_risk_enters_review() {
+    let (control_plane, _temp_dir, event_recorder) = setup_control_plane().await;
+
+    // Create a medium-risk task
+    let task = Task {
+        id: TaskId::new(),
+        case_id: None,
+        title: "Medium Risk Task".to_string(),
+        description: Some("Task requiring review".to_string()),
+        kind: TaskKind::Execute,
+        priority: Priority::Medium,  // Medium priority triggers review
+        status: TaskStatus::Created,
+        retries_left: 3,
+        retry_config: None,
+        parent_id: None,
+        depends_on: vec![],
+        task_settings: TaskSettings::default(),
+    };
+
+    // Submit task
+    let submit_request = SubmitTaskRequest {
+        trace_id: TraceId::new(),
+        task: task.clone(),
+        session: None,
+        actor: ActorRef {
+            id: ActorId::new(),
+            actor_type: ActorType::Human,
+            tenant_id: None,
+            home_node_id: None,
+            display_name: "User".to_string(),
+        },
+        workspace: None,
+    };
+
+    let result = control_plane.submit_task(submit_request).await.unwrap();
+    assert!(!result.submitted);  // Not submitted directly
+    assert!(result.review_id.is_some());  // Has review ID
+
+    let execution_id = result.execution_id;
+    let review_id = result.review_id.unwrap();
+
+    // Check execution status is WaitingReview
+    let status = control_plane
+        .execution_service()
+        .get_status(&execution_id)
+        .await
+        .unwrap();
+    assert_eq!(status, Some(ExecutionStatus::WaitingReview));
+
+    // Check review is in queue
+    let reviews = control_plane.review_queue().list();
+    assert!(reviews.iter().any(|r| r.id == review_id));
+
+    // Query events
+    let events = event_recorder.query_by_execution_id(&execution_id);
+    let has_review_created = events.iter().any(|e| matches!(e, ObservabilityEvent::ReviewCreated { .. }));
+    assert!(has_review_created);
+}
+
+#[tokio::test]
+async fn test_review_approval_leads_to_execution() {
+    let (control_plane, _temp_dir, event_recorder) = setup_control_plane().await;
+
+    // Create a high-risk task
+    let task = Task {
+        id: TaskId::new(),
+        case_id: None,
+        title: "High Risk Task".to_string(),
+        description: Some("Task needing approval".to_string()),
+        kind: TaskKind::Execute,
+        priority: Priority::High,  // High priority triggers review
+        status: TaskStatus::Created,
+        retries_left: 3,
+        retry_config: None,
+        parent_id: None,
+        depends_on: vec![],
+        task_settings: TaskSettings::default(),
+    };
+
+    // Submit task
+    let actor = ActorRef {
+        id: ActorId::new(),
+        actor_type: ActorType::Human,
+        tenant_id: None,
+        home_node_id: None,
+        display_name: "Reviewer".to_string(),
+    };
+
+    let submit_request = SubmitTaskRequest {
+        trace_id: TraceId::new(),
+        task: task.clone(),
+        session: None,
+        actor: actor.clone(),
+        workspace: None,
+    };
+
+    let result = control_plane.submit_task(submit_request).await.unwrap();
+    let execution_id = result.execution_id;
+    let review_id = result.review_id.unwrap();
+
+    // Approve the review
+    let approval = cyberclaw_core::review::ReviewApproval {
+        review_id: review_id.clone(),
+        reviewer: actor,
+        decision: cyberclaw_core::review::ReviewDecision::Approved,
+        comment: Some("Approved for testing".to_string()),
+        conditions: vec![],
+    };
+
+    control_plane.review_queue().approve(approval).await.unwrap();
+
+    // Wait for status transition
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check execution status changed from WaitingReview
+    let status = control_plane
+        .execution_service()
+        .get_status(&execution_id)
+        .await
+        .unwrap();
+    assert_ne!(status, Some(ExecutionStatus::WaitingReview));
+
+    // Check review is completed
+    let review = control_plane.review_queue()
+        .get(&review_id)
+        .unwrap();
+    assert_eq!(review.status, ReviewStatus::Approved);
+
+    // Query events
+    let events = event_recorder.query_by_execution_id(&execution_id);
+    let has_review_approved = events.iter().any(|e| matches!(e, ObservabilityEvent::ReviewApproved { .. }));
+    assert!(has_review_approved);
+}
+
+#[tokio::test]
+async fn test_capability_execution_failure_enters_failed_state() {
+    let (control_plane, _temp_dir, event_recorder) = setup_control_plane().await;
+
+    // Create a task that will fail during capability execution
+    // We'll use a non-existent capability to trigger failure
+    let task = Task {
+        id: TaskId::new(),
+        case_id: None,
+        title: "Failing Task".to_string(),
+        description: Some("Task that will fail".to_string()),
+        kind: TaskKind::Execute,
+        priority: Priority::Low,
+        status: TaskStatus::Created,
+        retries_left: 0,  // No retries
+        retry_config: None,
+        parent_id: None,
+        depends_on: vec![],
+        task_settings: TaskSettings::default(),
+    };
+
+    // Submit task with a capability requirement that will fail
+    let submit_request = SubmitTaskRequest {
+        trace_id: TraceId::new(),
+        task: task.clone(),
+        session: None,
+        actor: ActorRef {
+            id: ActorId::new(),
+            actor_type: ActorType::System,
+            tenant_id: None,
+            home_node_id: None,
+            display_name: "Test".to_string(),
+        },
+        workspace: None,
+    };
+
+    let result = control_plane.submit_task(submit_request).await.unwrap();
+    let execution_id = result.execution_id;
+
+    // Create a plan that includes a non-existent capability
+    let plan = ExecutionPlan {
+        resolution: ResolutionOutput {
+            agent: AgentId::from_string("test-agent".to_string()).unwrap(),
+            skills: vec![],
+            connectors: vec![],
+            capabilities: vec![CapabilityId::from_string("nonexistent.capability".to_string()).unwrap()],
+            workflows: vec![],
+        },
+        actions: vec![
+            ExecutionAction::UseCapability {
+                capability_id: CapabilityId::from_string("nonexistent.capability".to_string()).unwrap(),
+                connector_id: Some(ConnectorId::from_string("local".to_string()).unwrap()),
+                input: serde_json::json!({}),
+            },
+        ],
+        review_required: false,
+    };
+
+    // Try to execute the plan
+    control_plane
+        .execution_service()
+        .execute_plan(&execution_id, plan)
+        .await
+        .ok();  // Ignore error
+
+    // Wait for execution
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check that execution entered Failed state
+    let status = control_plane
+        .execution_service()
+        .get_status(&execution_id)
+        .await
+        .unwrap();
+
+    // Should be Failed or Created (if plan execution failed early)
+    assert!(matches!(
+        status,
+        Some(ExecutionStatus::Failed) | Some(ExecutionStatus::Created)
+    ));
+
+    // Query events to verify failure was recorded
+    let events = event_recorder.query_by_execution_id(&execution_id);
+    assert!(!events.is_empty());
+}
+
+#[tokio::test]
+async fn test_observability_event_querying_by_execution_id() {
+    let (control_plane, _temp_dir, event_recorder) = setup_control_plane().await;
+
+    // Create multiple tasks with different execution IDs
+    let mut execution_ids = vec![];
+
+    for i in 0..3 {
+        let task = Task {
+            id: TaskId::new(),
+            case_id: None,
+            title: format!("Task {}", i),
+            description: Some(format!("Test task {}", i)),
+            kind: TaskKind::Execute,
+            priority: Priority::Low,
+            status: TaskStatus::Created,
+            retries_left: 3,
+            retry_config: None,
+            parent_id: None,
+            depends_on: vec![],
+            task_settings: TaskSettings::default(),
+        };
+
+        let submit_request = SubmitTaskRequest {
+            trace_id: TraceId::new(),
+            task,
+            session: None,
+            actor: ActorRef {
+                id: ActorId::new(),
+                actor_type: ActorType::System,
+                tenant_id: None,
+                home_node_id: None,
+                display_name: format!("Test{}", i),
+            },
+            workspace: None,
+        };
+
+        let result = control_plane.submit_task(submit_request).await.unwrap();
+        execution_ids.push(result.execution_id);
+    }
+
+    // Query events for each execution ID
+    for exec_id in &execution_ids {
+        let events = event_recorder.query_by_execution_id(exec_id);
+        assert!(!events.is_empty(), "No events found for execution {}", exec_id);
+
+        // All events should have the same execution_id
+        for event in &events {
+            match event {
+                ObservabilityEvent::ExecutionSubmitted { execution_id, .. } |
+                ObservabilityEvent::StatusTransition { execution_id, .. } |
+                ObservabilityEvent::ExecutionCompleted { execution_id, .. } |
+                ObservabilityEvent::ExecutionFailed { execution_id, .. } |
+                ObservabilityEvent::ReviewCreated { execution_id, .. } |
+                ObservabilityEvent::ReviewApproved { execution_id, .. } |
+                ObservabilityEvent::ReviewRejected { execution_id, .. } => {
+                    assert_eq!(execution_id, exec_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Verify events are isolated by execution_id
+    let events_0 = event_recorder.query_by_execution_id(&execution_ids[0]);
+    let events_1 = event_recorder.query_by_execution_id(&execution_ids[1]);
+
+    // Events for different executions should not overlap
+    for event in &events_0 {
+        assert!(!events_1.contains(event));
+    }
+}

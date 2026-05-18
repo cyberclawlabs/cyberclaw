@@ -1,0 +1,69 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cyberclaw-server
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cyberclaw-server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Ingress controller → cyberclaw HTTP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000
+    # Prometheus → metrics
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    # Inter-pod Raft (peer servers in same namespace)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cyberclaw-server
+      ports:
+        - protocol: TCP
+          port: 7700
+  egress:
+    # DNS — required for everything below
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Inter-pod Raft
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cyberclaw-server
+      ports:
+        - protocol: TCP
+          port: 7700
+    # External egress for LLM provider — overlays should narrow to
+    # specific FQDNs via FQDN-based NetworkPolicies (Calico/Cilium)
+    # or restrict to a specific egress IP range.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8       # cluster-internal RFC1918
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16   # link-local + cloud metadata
+      ports:
+        - protocol: TCP
+          port: 443

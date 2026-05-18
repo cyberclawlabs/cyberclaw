@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet"
+  />
+  <title>CyberClaw Admin</title>
+  <script>
+    // 与 v1 cyberclaw.html 同步：在 React 渲染前应用 saved theme，避免黑白闪屏。
+    // localStorage key 'cyberclaw.admin.tweaks' 与老 stack 共享。
+    // 用 documentElement (html) 而非 body —— head script 阶段 body 还不存在。
+    (function () {
+      try {
+        var saved = JSON.parse(localStorage.getItem('cyberclaw.admin.tweaks') || 'null') || {};
+        // Allow-listed preset names — must match Theme union in AppV2.tsx
+        // and the .<name> blocks in src/index.css. Any unknown saved value
+        // falls back to dark.
+        var allowed = { dark: 1, light: 1, midnight: 1, sepia: 1 };
+        var theme = allowed[saved.theme] ? saved.theme : 'dark';
+        document.documentElement.classList.add(theme);
+      } catch (e) {
+        document.documentElement.classList.add('dark');
+      }
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

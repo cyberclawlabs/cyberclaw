@@ -1,0 +1,35 @@
+# Prometheus config for CyberClaw staging.
+#
+# Scrapes the cyberclaw-server `/metrics` endpoint at 5s interval. The
+# server runs in a sibling container on the same podman network — refer
+# to it by its container name (`cyberclaw-staging`).
+#
+# In production, replace static_configs with service discovery (kubernetes,
+# consul, etc.) and lift the scrape interval to 15-30s.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    environment: staging
+    service: cyberclaw
+
+# Sprint 20 W1 — alerting rules (deploy/monitoring/alerts.yml).
+# Mount this file into the Prometheus container alongside this config
+# (the staging-podman.sh script bind-mounts the monitoring dir).
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: cyberclaw-server
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['cyberclaw-staging:3000']
+        labels:
+          instance: cyberclaw-staging-1
+          tier: app
+
+  # Self-scrape so Prometheus's own counters are visible.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

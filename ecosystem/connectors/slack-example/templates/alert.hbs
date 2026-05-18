@@ -1,0 +1,31 @@
+{{#if (eq severity "critical")}}:rotating_light:{{/if}}{{#if (eq severity "high")}}:warning:{{/if}}{{#if (eq severity "medium")}}:large_orange_diamond:{{/if}}{{#if (eq severity "low")}}:information_source:{{/if}} *{{title}}*
+
+*Severity:* {{severity}}
+*Time:* {{timestamp}}
+{{#if source}}*Source:* {{source}}{{/if}}
+{{#if service}}*Service:* {{service}}{{/if}}
+
+*Details:*
+{{details}}
+
+{{#if metrics}}
+*Metrics:*
+{{#each metrics}}
+• {{this.name}}: {{this.value}} {{this.unit}}
+{{/each}}
+{{/if}}
+
+{{#if actions}}
+*Recommended Actions:*
+{{#each actions}}
+{{@index}}. {{this}}
+{{/each}}
+{{/if}}
+
+{{#if runbook_url}}
+:book: <{{runbook_url}}|View Runbook>
+{{/if}}
+
+{{#if assignee}}
+*Assigned to:* @{{assignee}}
+{{/if}}

@@ -1,0 +1,35 @@
+apiVersion: cyberclaw.io/v2
+kind: PlatformPlugin
+id: audit-enricher
+version: 0.1.0
+name: audit-enricher
+displayName: Audit Enricher
+summary: Platform plugin that enriches audit records after execution and review events.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - audit
+  - observability
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: hooks/enrich_audit.sh
+  files:
+    - hooks/enrich_audit.sh
+spec:
+  runtime: native
+  hooks:
+    - event: execution.completed
+      phase: after
+      handler: hooks/enrich_audit.sh
+    - event: review.approved
+      phase: after
+      handler: hooks/enrich_audit.sh
+  permissions:
+    audit.write: true
+    trace.read: true
+  failurePolicy:
+    onError: continue
+    emitSecurityEvent: true

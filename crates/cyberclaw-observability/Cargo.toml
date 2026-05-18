@@ -1,0 +1,54 @@
+[package]
+name = "cyberclaw-observability"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# v1.2.15: `otel` is on by default so server binaries ship with OTLP-HTTP/JSON
+# export wired in. Operator still has to set `CYBERCLAW_OTLP_ENDPOINT` to
+# activate it — `init_from_env` returns `None` (no overhead) when unset.
+default = ["otel"]
+# OTLP-HTTP/JSON export. Uses reqwest only — no opentelemetry-sdk dependency.
+# Hand-rolls the OTLP/HTTP payload per spec
+# (https://opentelemetry.io/docs/specs/otlp/#otlphttp). Point at any
+# OTLP/HTTP-JSON collector — Jaeger 4318, Tempo, Grafana Cloud, etc.
+otel = ["dep:reqwest"]
+
+[dependencies]
+cyberclaw-core.workspace = true
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Metrics
+# 已升级到 prometheus 0.14.0 修复 RUSTSEC-2024-0437 (protobuf DoS 漏洞)
+prometheus = { version = "0.14.0", features = ["process"] }
+lazy_static = "1.4"
+
+# Async
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+# HTTP client for OTLP export (optional, used only with `otel` feature)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Async traits
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+loom = { workspace = true }
+rand = "0.8"
+proptest = "1.0"

@@ -1,0 +1,71 @@
+# MCP Server Configuration Examples
+# This file demonstrates various MCP server configurations for CyberClaw
+
+# Example 1: Filesystem MCP Server (stdio transport)
+# Provides file system access via MCP protocol
+servers:
+  - name: "filesystem"
+    transport:
+      type: "stdio"
+      command: "npx"
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-filesystem"
+        - "/tmp"
+    timeout: 30s
+    enable_cache: true
+
+  # Example 2: Database MCP Server (stdio transport)
+  # Provides database query capabilities
+  - name: "database"
+    transport:
+      type: "stdio"
+      command: "npx"
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-postgres"
+        - "postgresql://localhost/mydb"
+    timeout: 60s
+    enable_cache: false
+
+  # Example 3: Custom HTTP MCP Server
+  # Connects to a custom MCP server via HTTP
+  - name: "custom-api"
+    transport:
+      type: "http"
+      url: "http://localhost:8080/mcp"
+      headers:
+        Authorization: "Bearer YOUR_API_KEY"
+        Content-Type: "application/json"
+    timeout: 30s
+    enable_cache: true
+
+  # Example 4: Git MCP Server (stdio transport)
+  # Provides git operations via MCP
+  - name: "git"
+    transport:
+      type: "stdio"
+      command: "npx"
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-git"
+      workdir: "/path/to/repo"
+    timeout: 45s
+    enable_cache: false
+
+  # Example 5: Web Search MCP Server (HTTP transport)
+  # Provides web search capabilities
+  - name: "web-search"
+    transport:
+      type: "http"
+      url: "https://api.example.com/mcp/search"
+      headers:
+        X-API-Key: "YOUR_SEARCH_API_KEY"
+    timeout: 15s
+    enable_cache: true
+
+# Notes:
+# - stdio transport spawns a child process and communicates via stdin/stdout
+# - HTTP transport makes JSON-RPC requests to a remote server
+# - timeout is the maximum time to wait for a response (in seconds or with unit suffix)
+# - enable_cache determines whether responses should be cached (recommended for read-only resources)

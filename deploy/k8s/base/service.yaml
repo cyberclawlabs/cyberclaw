@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cyberclaw-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cyberclaw-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+---
+# Headless service for Raft peer discovery (cluster mode).
+apiVersion: v1
+kind: Service
+metadata:
+  name: cyberclaw-raft
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: cyberclaw-server
+  ports:
+    - name: raft
+      port: 7700
+      targetPort: raft
+      protocol: TCP

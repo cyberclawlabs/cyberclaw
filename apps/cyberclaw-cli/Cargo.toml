@@ -1,0 +1,39 @@
+[package]
+name = "cyberclaw-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+cyberclaw-control-plane.workspace = true
+cyberclaw-core.workspace = true
+cyberclaw-connectors.workspace = true
+cyberclaw-governance.workspace = true
+cyberclaw-observability.workspace = true
+cyberclaw-llm.workspace = true
+cyberclaw-llm-bridge.workspace = true
+cyberclaw-server = { path = "../cyberclaw-server" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml.workspace = true
+inquire = "0.7"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+rustyline = "14"
+futures.workspace = true
+ratatui = "0.29"
+tui-textarea = { version = "0.7", features = ["crossterm"] }
+crossterm = "0.28"
+pulldown-cmark = "0.9"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.14"

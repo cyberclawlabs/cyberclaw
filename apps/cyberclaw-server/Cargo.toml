@@ -1,0 +1,108 @@
+[package]
+name = "cyberclaw-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "cyberclaw_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cyberclaw-server"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+anyhow.workspace = true
+tokio.workspace = true
+
+# Logging and tracing
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Web framework
+axum = { version = "0.7", features = ["ws", "multipart"] }
+portable-pty = "0.8"
+axum-extra = { version = "0.9", features = ["typed-header"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = { version = "0.4", features = ["limit", "buffer"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
+tower_governor = "0.4"
+governor = "0.6"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+# JWT Authentication
+jsonwebtoken = "9"
+
+# Date/Time
+chrono.workspace = true
+
+# Cron expression parsing
+cron = "0.12"
+
+# Error handling
+thiserror.workspace = true
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# URL parsing (admin browser status host whitelist + multimodal vision URL gating)
+url = "2"
+
+# Streaming
+futures.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# TOML config persistence (channels.toml)
+toml = { workspace = true }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Webhook signature validation
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2.5"
+
+# Base64 (admin multimodal endpoints — encode artifact bytes for HTTP egress)
+base64 = "0.21"
+
+# Audit log backend (Sprint 8 Lane 1) — SQLite WAL + hash chain.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# CyberClaw dependencies
+cyberclaw-core.workspace = true
+cyberclaw-control-plane.workspace = true
+cyberclaw-connectors.workspace = true
+cyberclaw-llm.workspace = true
+cyberclaw-llm-bridge.workspace = true
+cyberclaw-observability.workspace = true
+cyberclaw-governance.workspace = true
+cyberclaw-agent-runtime.workspace = true
+cyberclaw-skill-runtime.workspace = true
+cyberclaw-scheduler.workspace = true
+cyberclaw-plugin-runtime.workspace = true
+cyberclaw-consensus.workspace = true
+cyberclaw-store.workspace = true
+cyberclaw-workflow.workspace = true
+tonic = "0.11"
+
+# Async traits
+async-trait.workspace = true
+
+# 2026-05-17 (v1.2.9): atomic file write for tools_overrides persistence
+# (NamedTempFile + persist guarantees readers never see a half-written file).
+tempfile = "3"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+futures = "0.3"
+serial_test = "3.0"
+tempfile = "3"

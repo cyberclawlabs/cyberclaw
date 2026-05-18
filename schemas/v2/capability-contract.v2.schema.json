@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyberclaw.io/capability-contract.v2.schema.json",
+  "type": "object",
+  "required": ["id", "title", "inputSchema", "outputSchema", "risk", "effects"],
+  "properties": {
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "inputSchema": { "type": "string" },
+    "outputSchema": { "type": "string" },
+    "risk": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "effects": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "timeouts": {
+      "type": "object",
+      "properties": {
+        "requestMs": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,86 @@
+# ============================================
+# .dockerignore - CyberClaw Docker 构建排除规则
+# ============================================
+# 排除不必要的文件，减小构建上下文大小和镜像体积
+
+# ---- 构建产物 ----
+target/
+**/target/
+
+# ---- 版本控制 ----
+.git/
+.gitignore
+.gitattributes
+
+# ---- 文档（不需要进入构建上下文）----
+*.md
+docs/
+CHANGELOG.md
+CONTRIBUTING.md
+DEVELOPMENT.md
+SECURITY.md
+DOCUMENTATION_SYSTEM.md
+
+# ---- 环境与密钥（绝不进入镜像）----
+.env
+.env.*
+*.env
+*.secret
+*.pem
+*.key
+*.cert
+*.crt
+certs/
+
+# ---- 编辑器和 IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- 日志和临时文件 ----
+*.log
+tmp/
+temp/
+.tmp/
+
+# ---- 测试和覆盖率 ----
+*.profraw
+*.profdata
+coverage/
+lcov.info
+tarpaulin-report.*
+
+# ---- Node.js（如果有前端工具）----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# ---- 模糊测试产物 ----
+fuzz/
+corpus/
+
+# ---- OMC 状态（本地开发工具状态）----
+.omc/state/
+**/.omc/state/
+
+# ---- CI/CD 配置（镜像内不需要）----
+.github/
+.gitlab-ci.yml
+.circleci/
+Jenkinsfile
+
+# ---- Docker 自身文件（避免循环引用）----
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# ---- 测试报告和分析文件 ----
+*.backup
+*.bak
+*_REPORT.md
+*_SUMMARY.md
+*READINESS*.md
+*GUIDE*.md

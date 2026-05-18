@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cyberclaw-server
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cyberclaw-server
+      containers:
+        - name: cyberclaw-server
+          env:
+            # Cluster mode for multi-replica Raft consensus.
+            - name: CYBERCLAW_CLUSTER_MODE
+              value: "raft"
+            # Pod IP-based node id so each replica differs.
+            - name: CYBERCLAW_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Discover peers via headless Service.
+            - name: CYBERCLAW_RAFT_PEERS
+              value: "cyberclaw-raft.cyberclaw.svc.cluster.local"

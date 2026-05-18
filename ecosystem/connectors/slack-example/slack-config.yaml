@@ -1,0 +1,75 @@
+# Slack Connector 配置示例
+
+slack:
+  # Slack Bot Token (从 Slack App 管理页面获取)
+  bot_token: "xoxb-your-bot-token-here"
+
+  # API 端点 (通常使用默认值)
+  api_base: "https://slack.com/api"
+
+  # 超时设置 (秒)
+  timeout: 30
+
+  # 速率限制 (每秒请求数)
+  rate_limit:
+    requests_per_second: 5
+    burst_size: 10
+
+  # 重试策略
+  retry:
+    max_retries: 3
+    backoff_strategy: "exponential"
+    initial_delay_ms: 1000
+    max_delay_ms: 30000
+
+  # 默认频道配置
+  defaults:
+    channel: "#general"
+    thread_replies: false
+    link_names: true
+    parse_mode: "full"
+
+# 消息模板配置
+templates:
+  # 存储模板的目录
+  template_dir: "./templates"
+
+  # 预加载的模板列表
+  preload:
+    - name: "welcome"
+      file: "welcome.hbs"
+    - name: "alert"
+      file: "alert.hbs"
+    - name: "report"
+      file: "report.hbs"
+
+# 安全配置
+security:
+  # 签名验证
+  verify_signature: true
+  signing_secret: "your-signing-secret-here"
+
+  # 允许的频道列表 (空表示允许所有)
+  allowed_channels: []
+
+  # 禁止的频道列表
+  blocked_channels:
+    - "#random"
+    - "#off-topic"
+
+  # 文件上传限制
+  file_upload:
+    max_size_mb: 100
+    allowed_types:
+      - "text/plain"
+      - "image/png"
+      - "image/jpeg"
+      - "application/pdf"
+      - "application/json"
+
+# 日志配置
+logging:
+  level: "info"
+  format: "json"
+  include_request_body: false
+  include_response_body: false

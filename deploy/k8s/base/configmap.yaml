@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cyberclaw-config
+data:
+  # ===== Runtime selection =====
+  # Production should use risk-based once Container runtime is wired
+  # via DinD sidecar. Without sidecar, fall back to "process" so
+  # Medium+High risk capabilities still dispatch (with timeout +
+  # output cap as the isolation boundary, no namespace).
+  CYBERCLAW_RUNTIME_STRATEGY: "process"
+
+  # ===== Workspace + boundary =====
+  # Ephemeral per-pod workspace. K8s schedules each replica fresh —
+  # don't rely on /workspace contents surviving restarts.
+  CYBERCLAW_WORKSPACE: "/tmp"
+  CYBERCLAW_WORKSPACE_WRITABLE_ROOTS: "/tmp,/var/lib/cyberclaw"
+
+  # ===== Policy =====
+  # Critical → review queue; Low/Medium/High dispatch directly.
+  CYBERCLAW_POLICY_REVIEW_THRESHOLD: "Critical"
+
+  # ===== Process whitelist (cmd.exec) =====
+  # Production-conservative. Operators can override per-overlay.
+  CYBERCLAW_PROCESS_WHITELIST: "ls,cat,head,tail,wc,grep,find,echo,pwd,date,env,uname,whoami,stat,file,rg,fd,tree"
+
+  # ===== Container image (when DinD sidecar is configured) =====
+  # The image used by cmd.exec when ContainerRuntime is wired.
+  CYBERCLAW_CONTAINER_IMAGE: "alpine:3.19"
+
+  # ===== Rate limiting =====
+  RATE_LIMIT_PER_SECOND: "100"
+  RATE_LIMIT_BURST_SIZE: "300"
+
+  # ===== Audit + Memory =====
+  CYBERCLAW_AUDIT_DB: "/home/cyberclaw/.cyberclaw/audit.db"
+
+  # ===== Observability =====
+  RUST_LOG: "info,cyberclaw=info"
+
+  # ===== Cluster mode (single-node default; switch in overlay) =====
+  CYBERCLAW_CLUSTER_MODE: "single"
+  CYBERCLAW_NODE_ID: "cyberclaw-server-0"
+  CYBERCLAW_RAFT_BIND_ADDR: "0.0.0.0:7700"

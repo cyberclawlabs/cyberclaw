@@ -1,0 +1,189 @@
+# CyberClaw Prometheus alerting rules
+#
+# Sprint 20 W1 — first SLO + alerting baseline. The metrics referenced
+# below are emitted by `crates/cyberclaw-observability/src/metrics.rs`
+# (Prometheus 0.14.0).
+#
+# Severity convention:
+#   - critical: page on-call immediately (P0/P1)
+#   - warning : queue for next business hour (P2)
+#   - info    : informational; surfaces in dashboard but no page
+#
+# Alert rules ship empty `for:` durations sized for ~5min stability;
+# tune per environment in your overlay's prometheus-rule.yaml.
+
+groups:
+  # ─── SLO burn-rate alerts ────────────────────────────────────────────
+  # 99.9% availability SLO over 30 days = ~43 minutes of downtime/month
+  # error budget. Fast-burn = consuming 2% of budget in 1 hour.
+  # Slow-burn = 5% in 6 hours. Both page on-call.
+  - name: cyberclaw-slo
+    rules:
+      - alert: CyberClawAvailabilitySloFastBurn
+        expr: |
+          (
+            sum(rate(cyberclaw_execution_total{outcome="failed"}[1h]))
+            /
+            sum(rate(cyberclaw_execution_total[1h]))
+          ) > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          slo: availability
+        annotations:
+          summary: "Execution failure rate >2% over 1h (SLO fast-burn)"
+          description: |
+            CyberClaw is consuming the availability error budget at a rate
+            that will exhaust it in <2 days. Investigate via /api/v1/audit
+            and /api/v1/runtime/timeline. RB-09 has the diagnostic ladder.
+          runbook: https://internal-wiki/cyberclaw/RB-09
+
+      - alert: CyberClawAvailabilitySloSlowBurn
+        expr: |
+          (
+            sum(rate(cyberclaw_execution_total{outcome="failed"}[6h]))
+            /
+            sum(rate(cyberclaw_execution_total[6h]))
+          ) > 0.005
+        for: 30m
+        labels:
+          severity: warning
+          slo: availability
+        annotations:
+          summary: "Execution failure rate >0.5% over 6h (SLO slow-burn)"
+          description: |
+            Sustained failure rate is 5x the SLO target. Not actionable
+            this hour but trending toward an SLO breach this week.
+
+  # ─── Latency alerts (capability execution) ────────────────────────────
+  - name: cyberclaw-latency
+    rules:
+      - alert: CyberClawCapabilityP99LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(cyberclaw_capability_invocation_duration_seconds_bucket[5m]))
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Capability invocation p99 >5s for 10m"
+          description: |
+            Slow capability dispatch — likely Container runtime cold-start
+            or an LLM provider rate-limit. Check /api/v1/system/ready and
+            container runtime status.
+
+      - alert: CyberClawCapabilityP99LatencyCritical
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(cyberclaw_capability_invocation_duration_seconds_bucket[5m]))
+          ) > 30
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Capability invocation p99 >30s — degraded"
+          description: |
+            User-facing latency is severe. p99 above the dispatcher's
+            10-minute hard timeout means many requests hit the timeout
+            ceiling. Usually = LLM provider down or container runtime
+            saturated.
+
+  # ─── Review queue health ──────────────────────────────────────────────
+  - name: cyberclaw-review
+    rules:
+      - alert: CyberClawReviewQueueDepth
+        expr: cyberclaw_review_queue_size > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Review queue depth >100 for 15m"
+          description: |
+            Operators are not draining the review queue fast enough.
+            Either review staffing is short or PolicyEngine is over-
+            triggering. Check governance settings + /api/v1/reviews.
+
+      - alert: CyberClawReviewWaitTimeP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(cyberclaw_review_wait_seconds_bucket[1h]))
+          ) > 1800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Review wait time p95 >30min over 1h"
+          description: |
+            Reviews are sitting in queue >30 minutes at p95 — agents
+            waiting for human decisions are blocked. Escalate to ops
+            staffing.
+
+  # ─── Retry / circuit-breaker fatigue ──────────────────────────────────
+  - name: cyberclaw-retries
+    rules:
+      - alert: CyberClawRetryExhaustedSpike
+        expr: |
+          sum(rate(cyberclaw_retry_exhausted_count[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retry exhaustion >1/s for 5m"
+          description: |
+            Sustained retry exhaustion = downstream component is
+            persistently failing. Identify which retry source by querying
+            `cyberclaw_retry_exhausted_count` by label.
+
+  # ─── Pod / container health ──────────────────────────────────────────
+  - name: cyberclaw-pod
+    rules:
+      - alert: CyberClawPodNotReady
+        expr: |
+          kube_pod_status_ready{
+            namespace=~"cyberclaw|cyberclaw-staging",
+            condition="true"
+          } == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CyberClaw pod {{ $labels.pod }} not ready for 5m"
+          description: |
+            Liveness or readiness probe is failing. Check pod logs and
+            readiness probe diagnostics:
+              kubectl -n {{ $labels.namespace }} describe pod {{ $labels.pod }}
+              kubectl -n {{ $labels.namespace }} logs {{ $labels.pod }} --tail=200
+
+      - alert: CyberClawPodCrashLooping
+        expr: |
+          rate(kube_pod_container_status_restarts_total{
+            namespace=~"cyberclaw|cyberclaw-staging"
+          }[15m]) > 0.01
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CyberClaw pod {{ $labels.pod }} crash-looping"
+          description: |
+            >1 restart in 15m sustained. RB-07 has the OOMKilled +
+            startup-error diagnostic ladder.
+          runbook: https://internal-wiki/cyberclaw/RB-07
+
+  # ─── Scrape health (no metrics = blind ops) ───────────────────────────
+  - name: cyberclaw-scrape
+    rules:
+      - alert: CyberClawScrapeDown
+        expr: up{job="cyberclaw-server"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape cyberclaw-server"
+          description: |
+            We are blind. /metrics is unreachable for >2min. RB-08 covers
+            the diagnostic path (Prometheus side vs server-side vs network).
+          runbook: https://internal-wiki/cyberclaw/RB-08

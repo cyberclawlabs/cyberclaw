@@ -1,0 +1,101 @@
+# Rust
+/target/
+**/*.rs.bk
+*.bak*
+**/*.bak*
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+*.profraw
+*.profdata
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+
+# Database
+*.db
+*.sqlite
+
+# Credentials (NEVER commit)
+*.pem
+*.key
+secrets/
+credentials/
+.serena/
+
+# OMC runtime state (entire .omc directory)
+.omc/
+**/.omc/
+
+# Claude Code state
+.claude/
+
+# Temporary files and research directories
+tmp/
+
+# Playwright MCP test artifacts (L3 Playwright verification)
+.playwright-mcp/
+
+# Root directory PNG screenshots (Playwright UI verification)
+/*.png
+
+# Superpowers brainstorm visual companion artifacts
+.superpowers/
+
+# Node / Playwright e2e
+node_modules/
+playwright-report/
+test-results/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Compiled SPA bundle (build via 'npm run build:web')
+web/dist/
+
+# Staging deployment artifacts (secrets, scans, image tarballs)
+.staging/
+
+# Evaluation run outputs (audit DBs, workspace dumps — keep reports under docs/)
+artifacts/
+
+# Stray binary deliverables in repo root (e2e tests sometimes write to cwd
+# instead of artifacts/ — those should never be committed). slides.render
+# tests, screenshot dumps, etc. all belong in artifacts/ or /tmp.
+/*.pptx
+/*.docx
+/*.xlsx
+/*.pdf
+/*.zip
+
+# Generated public release artifacts (build-release.sh output)
+/release/
+web/dist-vite/
+
+# WebUI runtime uploads (user-supplied content, not source)
+web/uploads/*
+!web/uploads/.gitkeep

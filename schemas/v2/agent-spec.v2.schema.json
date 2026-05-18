@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyberclaw.io/agent-spec.v2.schema.json",
+  "type": "object",
+  "required": ["role", "class", "description", "systemPromptFile"],
+  "properties": {
+    "role": { "type": "string" },
+    "class": {
+      "type": "string",
+      "enum": ["master", "business", "security-supervisor", "subagent-template"]
+    },
+    "description": { "type": "string" },
+    "personaFile": { "type": "string" },
+    "policyFile": { "type": "string" },
+    "memoryFile": { "type": "string" },
+    "systemPromptFile": { "type": "string" },
+    "defaultSkills": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "defaultConnectors": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "defaultWorkflow": { "type": "string" },
+    "spawnPolicy": {
+      "type": "object",
+      "properties": {
+        "canSpawn": { "type": "boolean" },
+        "maxDepth": { "type": "integer", "minimum": 0 },
+        "allowedChildren": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

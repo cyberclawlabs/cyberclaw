@@ -1,0 +1,45 @@
+[workspace]
+
+[package]
+name = "cyberclaw-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+
+[dependencies.cyberclaw-core]
+path = "../crates/cyberclaw-core"
+
+[[bin]]
+name = "capability_parser"
+path = "fuzz_targets/capability_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "execution_parser"
+path = "fuzz_targets/execution_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prompt_injection_detector"
+path = "fuzz_targets/prompt_injection_detector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "workspace_path_validator"
+path = "fuzz_targets/workspace_path_validator.rs"
+test = false
+doc = false
+bench = false

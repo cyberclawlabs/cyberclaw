@@ -1,0 +1,90 @@
+# CyberClaw Server 配置文件
+
+[server]
+# 服务器监听地址和端口
+host = "0.0.0.0"
+port = 8080
+
+# 请求超时时间（秒）
+request_timeout = 30
+
+# CORS 允许的源（逗号分隔）
+cors_origins = ["*"]
+
+# 最大请求体大小（字节）
+max_body_size = 10485760  # 10MB
+
+[llm]
+# LLM 提供商类型
+# 可选值: openai, ark, anthropic, generic, minimax
+provider = "minimax"
+
+# 默认模型
+model = "minimax-m2.5"
+
+# API Key（建议通过环境变量 LLM_API_KEY 设置，而不是写在配置文件中）
+# api_key = "your-api-key-here"
+
+# API Base URL
+base_url = "https://api.minimax.chat/v1"
+
+# 请求参数默认值
+[llm.defaults]
+temperature = 0.7
+max_tokens = 2048
+top_p = 0.95
+
+# MiniMax 特定配置
+[llm.minimax]
+# MiniMax 模型列表
+models = [
+    "minimax-m2.5",
+    "abab6.5-chat",
+    "abab6.5s-chat",
+    "abab5.5-chat",
+    "abab5.5s-chat"
+]
+
+# 默认使用的模型
+default_model = "minimax-m2.5"
+
+# 模型别名映射
+[llm.minimax.model_aliases]
+"gpt-4" = "minimax-m2.5"
+"gpt-3.5-turbo" = "abab6.5-chat"
+
+# 其他 LLM 提供商配置示例
+
+# 火山引擎 ARK 平台（支持 MiniMax 等模型）
+# 参考文档: https://www.volcengine.com/docs/82379/1928261
+[llm.ark]
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+default_model = "doubao-pro-32k"
+
+# 火山引擎 ARK 支持的模型
+models = [
+    "doubao-pro-32k",      # 豆包 Pro 32K
+    "doubao-lite-32k",     # 豆包 Lite 32K
+    "minimax-abab6.5",     # MiniMax abab6.5
+    "minimax-abab6",       # MiniMax abab6
+]
+
+# 如果使用火山引擎的 MiniMax，设置为 ark provider
+# 并使用对应的 endpoint ID（从火山引擎控制台获取）
+[llm.ark.minimax]
+enabled = true
+# 需要从火山引擎控制台创建 MiniMax 推理接入点并获取 endpoint ID
+# endpoint_id = "ep-xxxxx-xxxxx"
+
+[llm.openai]
+base_url = "https://api.openai.com/v1"
+default_model = "gpt-4"
+
+[llm.anthropic]
+base_url = "https://api.anthropic.com/v1"
+default_model = "claude-3-5-sonnet-20241022"
+
+# 日志配置
+[logging]
+level = "info"
+format = "json"

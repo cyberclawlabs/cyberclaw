@@ -1,0 +1,119 @@
+# PrometheusRule CRD for prometheus-operator-managed clusters.
+#
+# This file mirrors the rule groups in deploy/monitoring/alerts.yml so
+# operators using kube-prometheus-stack / prometheus-operator can apply
+# the same alerts as the standalone (Podman) staging deployment.
+#
+# Skip this file if your cluster does not have prometheus-operator
+# CRDs installed — your monitoring stack should consume alerts.yml
+# directly from a ConfigMap mount.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cyberclaw-server
+  labels:
+    # Match the prometheus-operator's `ruleSelector.matchLabels`. Common
+    # values: `release: kube-prometheus-stack`, `prometheus: k8s`.
+    # Override per overlay if your cluster uses a different selector.
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cyberclaw-slo
+      rules:
+        - alert: CyberClawAvailabilitySloFastBurn
+          expr: |
+            (
+              sum(rate(cyberclaw_execution_total{outcome="failed"}[1h]))
+              /
+              sum(rate(cyberclaw_execution_total[1h]))
+            ) > 0.02
+          for: 5m
+          labels:
+            severity: critical
+            slo: availability
+          annotations:
+            summary: "Execution failure rate >2% over 1h (SLO fast-burn)"
+            description: |
+              CyberClaw is consuming the availability error budget at a rate
+              that will exhaust it in <2 days. RB-09 has the diagnostic ladder.
+
+        - alert: CyberClawAvailabilitySloSlowBurn
+          expr: |
+            (
+              sum(rate(cyberclaw_execution_total{outcome="failed"}[6h]))
+              /
+              sum(rate(cyberclaw_execution_total[6h]))
+            ) > 0.005
+          for: 30m
+          labels:
+            severity: warning
+            slo: availability
+
+    - name: cyberclaw-latency
+      rules:
+        - alert: CyberClawCapabilityP99LatencyHigh
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(cyberclaw_capability_invocation_duration_seconds_bucket[5m]))
+            ) > 5
+          for: 10m
+          labels:
+            severity: warning
+
+        - alert: CyberClawCapabilityP99LatencyCritical
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(cyberclaw_capability_invocation_duration_seconds_bucket[5m]))
+            ) > 30
+          for: 5m
+          labels:
+            severity: critical
+
+    - name: cyberclaw-review
+      rules:
+        - alert: CyberClawReviewQueueDepth
+          expr: cyberclaw_review_queue_size > 100
+          for: 15m
+          labels:
+            severity: warning
+
+        - alert: CyberClawReviewWaitTimeP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(cyberclaw_review_wait_seconds_bucket[1h]))
+            ) > 1800
+          for: 30m
+          labels:
+            severity: warning
+
+    - name: cyberclaw-pod
+      rules:
+        - alert: CyberClawPodNotReady
+          expr: |
+            kube_pod_status_ready{
+              namespace=~"cyberclaw|cyberclaw-staging",
+              condition="true"
+            } == 0
+          for: 5m
+          labels:
+            severity: critical
+
+        - alert: CyberClawPodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{
+              namespace=~"cyberclaw|cyberclaw-staging"
+            }[15m]) > 0.01
+          for: 10m
+          labels:
+            severity: critical
+
+    - name: cyberclaw-scrape
+      rules:
+        - alert: CyberClawScrapeDown
+          expr: up{job="cyberclaw-server"} == 0
+          for: 2m
+          labels:
+            severity: critical

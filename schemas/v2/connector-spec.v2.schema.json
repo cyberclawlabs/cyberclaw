@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyberclaw.io/connector-spec.v2.schema.json",
+  "type": "object",
+  "required": ["subtype", "runtime", "capabilities"],
+  "properties": {
+    "subtype": { "type": "string" },
+    "runtime": { "type": "string", "enum": ["native", "remote", "process", "container"] },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "modes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "secretRefs": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "capability-contract.v2.schema.json" },
+      "minItems": 1
+    }
+  },
+  "additionalProperties": true
+}

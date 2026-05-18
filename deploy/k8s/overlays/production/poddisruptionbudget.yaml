@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cyberclaw-server
+spec:
+  # Always keep at least 2/3 replicas available during voluntary
+  # disruptions (node drains, kubectl scale, etc.). Aligns with
+  # Raft quorum requirements (1 node down = still 2 voters).
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cyberclaw-server

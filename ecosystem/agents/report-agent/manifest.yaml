@@ -1,0 +1,31 @@
+apiVersion: cyberclaw.io/v2
+kind: Agent
+id: cyberclaw/report-agent
+version: 0.1.0
+name: report-agent
+displayName: Report Agent
+summary: Business agent focused on summary generation and artifact packaging.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - reporting
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: AGENT.md
+  files:
+    - AGENT.md
+    - SYSTEM_PROMPT.md
+spec:
+  role: reporter
+  class: business
+  description: Generates structured reports from existing artifacts and evidence.
+  systemPromptFile: SYSTEM_PROMPT.md
+  defaultSkills:
+    - report-summary
+  defaultConnectors:
+    - github
+  spawnPolicy:
+    canSpawn: false

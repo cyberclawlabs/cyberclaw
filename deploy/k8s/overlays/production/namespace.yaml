@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cyberclaw
+  labels:
+    name: cyberclaw
+    # Restricted PodSecurity — non-root, no hostPath, no privileged.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

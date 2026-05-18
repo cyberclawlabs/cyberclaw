@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyberclaw.io/platform-plugin-spec.v2.schema.json",
+  "type": "object",
+  "required": ["runtime", "hooks", "failurePolicy"],
+  "properties": {
+    "runtime": { "type": "string" },
+    "hooks": {
+      "type": "array",
+      "items": { "$ref": "platform-hook.v2.schema.json" },
+      "minItems": 1
+    },
+    "permissions": { "type": "object" },
+    "failurePolicy": {
+      "type": "object",
+      "required": ["onError"],
+      "properties": {
+        "onError": { "type": "string", "enum": ["continue", "fail", "disable"] },
+        "emitSecurityEvent": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

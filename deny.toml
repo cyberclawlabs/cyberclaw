@@ -1,0 +1,113 @@
+# cargo-deny configuration for CyberClaw.
+#
+# Run with `cargo deny check`. Used both locally and in CI to gate
+# the dep graph on:
+#   - advisories  — RustSec known-vulnerability database
+#   - licenses    — only allow licenses compatible with our Apache-2.0 release
+#   - bans        — flag suspicious / duplicate versions
+#   - sources     — only allow crates.io and our own paths
+#
+# Sprint 21 (2026-05-03): introduced as part of the v1.0.0-rc1
+# certification work. Updates to this file should be reviewed with
+# the same scrutiny as Cargo.toml dep changes.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "warn"
+ignore = [
+    # rsa 0.9.x — Marvin Attack (PKCS#1 v1.5 unpadding timing sidechannel
+    # during RSA decryption). Pulled by `pgp 0.16` →
+    # `cyberclaw-skill-runtime::skill_hub`. We use it only via
+    # `SignedPublicKey` + `StandaloneSignature` for *signature
+    # verification* (public-key operation). Marvin Attack does not apply
+    # to verification — it requires private-key decryption with a
+    # leaking unpadding step. No upstream fix is available; documented
+    # as accepted-with-rationale in
+    # docs/implementation/reports/production-cert-2026-05-03.md.
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin Attack only affects RSA decryption; we only do signature verification via pgp/skill_hub. No private-key decryption path exists. See production-cert-2026-05-03.md for rationale." },
+
+    # rustls-pemfile 2.x — unmaintained as of 2025-11. Pulled
+    # transitively by axum-server 0.7.x (TLS termination). The crate
+    # is a thin wrapper around rustls-pki-types' built-in PEM parser
+    # since v2.x, so functionality is intact and there are no known
+    # CVEs — only the maintenance flag. axum-server upgrade path is
+    # the long-term fix; tracked as post-rc1 dep cleanup.
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is a thin wrapper over rustls-pki-types since v2.x; functionally intact, no CVE, just unmaintained. axum-server upgrade is the long-term fix." },
+
+    # bincode 1.3.x — unmaintained. Used transitively by
+    # cyberclaw-control-plane via dep chain that doesn't expose user
+    # input directly to deserialization. bincode 2 migration is
+    # tracked as post-rc1.
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3 unmaintained; pulled transitively, no user-input deserialization exposure. bincode 2 migration tracked post-rc1." },
+
+    # fxhash 0.2.1 — unmaintained. Hash function in non-security-
+    # sensitive paths (caching, indexing). Replacement with
+    # rustc_hash tracked post-rc1.
+    { id = "RUSTSEC-2025-0057", reason = "fxhash used for cache/index hashing only; not security-sensitive. Migration to rustc_hash tracked post-rc1." },
+
+    # rand 0.8.5 — unsoundness only triggers with `rand::rng()` + a
+    # custom logger that calls back into rand. We use neither pattern.
+    # rand 0.9 migration tracked post-rc1.
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.8 unsoundness only triggers with rand::rng() + custom logger feedback; we use neither. Migration to rand 0.9 tracked post-rc1." },
+]
+
+[licenses]
+# License allowlist for CyberClaw (Apache-2.0 release).
+# All entries must be SPDX identifiers (https://spdx.org/licenses/).
+# Adding a license here implies we've checked compatibility with
+# Apache-2.0 and the project's own outbound license.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "OpenSSL",
+    # webpki-roots ships the Mozilla CA bundle under CDLA-Permissive-2.0.
+    # The license is purpose-built for permissive *data* redistribution
+    # (the cert bundle is data, not code) and is compatible with
+    # Apache-2.0 redistribution.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+# Reasonable per-crate exceptions go here. None at present.
+exceptions = []
+
+[bans]
+multiple-versions = "warn"  # Surface dup-version drift; do NOT fail (the workspace currently has many transitive dups; cleanup is post-rc1)
+# Wildcards: internal `path = "..."` deps don't carry a version
+# constraint, which cargo-deny treats as a wildcard. The workspace's
+# `publish = false` should suppress the warning via
+# `allow-wildcard-paths`, but cargo-deny only honors that flag when
+# every member crate inherits via `publish.workspace = true`. We
+# don't propagate that today (would touch 16 Cargo.toml files), so
+# we downgrade to "warn". Real wildcard registry deps would still
+# show up in the warning stream and can be reviewed in CI.
+wildcards = "warn"
+allow-wildcard-paths = true
+highlight = "all"
+# No explicit denies right now; add as future incidents surface.
+deny = []
+# crates we deliberately let coexist in multiple versions (transitive)
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

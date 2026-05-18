@@ -1,0 +1,91 @@
+# Heartbeat 监控配置示例
+#
+# 此文件展示了 HeartbeatConfig 的所有配置选项
+
+[heartbeat]
+# 监控检查间隔（秒）
+# 监控器会每隔这个时间检查一次所有节点的健康状态
+interval_secs = 30
+
+# 心跳超时倍数
+# 如果节点在 interval_secs * timeout_multiplier 秒内没有上报心跳，
+# 将被标记为离线状态
+# 例如：interval_secs = 30, timeout_multiplier = 3 => 90 秒超时
+timeout_multiplier = 3
+
+# CPU 使用率告警阈值（百分比）
+# 当节点 CPU 使用率超过此值时，触发告警
+cpu_threshold = 80.0
+
+# 内存使用率告警阈值（百分比）
+# 当节点内存使用率超过此值时，触发告警
+memory_threshold = 85.0
+
+# 磁盘使用率告警阈值（百分比）
+# 当节点磁盘使用率超过此值时，触发告警
+disk_threshold = 90.0
+
+# === 配置说明 ===
+
+# 1. 监控间隔设置建议
+#    - 开发环境: 5-10 秒（快速反馈）
+#    - 测试环境: 15-30 秒（平衡性能和及时性）
+#    - 生产环境: 30-60 秒（降低系统开销）
+
+# 2. 超时倍数设置建议
+#    - 稳定网络: 2-3 倍（快速检测离线）
+#    - 不稳定网络: 3-5 倍（减少误报）
+
+# 3. 阈值设置建议
+#    - 保守型: CPU 70%, Memory 75%, Disk 80%
+#    - 平衡型: CPU 80%, Memory 85%, Disk 90%（默认）
+#    - 激进型: CPU 90%, Memory 95%, Disk 95%
+
+# === 健康状态判定规则 ===
+
+# Healthy (健康):
+#   - 所有资源使用率 < 阈值
+
+# Degraded (降级):
+#   - 1+ 资源使用率 >= 阈值
+#   - 但 < 阈值 + 10% (CPU/Memory) 或 + 5% (Disk)
+
+# Unhealthy (不健康):
+#   - 1+ 资源使用率 >= 阈值 + 10% (CPU/Memory) 或 + 5% (Disk)
+
+# Offline (离线):
+#   - 心跳超时（超过 interval_secs * timeout_multiplier）
+
+# === 异常检测规则 ===
+
+# 1. 高资源使用率告警:
+#    - CPU >= cpu_threshold
+#    - Memory >= memory_threshold
+#    - Disk >= disk_threshold
+
+# 2. 资源使用率突增:
+#    - 当前值 > 历史平均值 * 1.5
+#    - 且当前值 > 50%
+#    - 历史窗口: 最近 10 个数据点
+
+# === 使用示例 ===
+
+# 在 Rust 代码中使用:
+# ```rust
+# use cyberclaw_scheduler::prelude::*;
+# 
+# let config = HeartbeatConfig {
+#     interval_secs: 30,
+#     timeout_multiplier: 3,
+#     cpu_threshold: 80.0,
+#     memory_threshold: 85.0,
+#     disk_threshold: 90.0,
+# };
+# 
+# let monitor = HeartbeatMonitor::new(config);
+# ```
+
+# 或使用默认配置:
+# ```rust
+# let monitor = HeartbeatMonitor::with_default();
+# ```

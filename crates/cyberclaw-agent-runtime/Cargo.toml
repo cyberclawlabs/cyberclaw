@@ -1,0 +1,31 @@
+[package]
+name = "cyberclaw-agent-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+cyberclaw-core.workspace = true
+cyberclaw-llm.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+tempfile = "3"
+cyberclaw-governance.workspace = true
+
+# Tool Calling 支持 (可选)
+cyberclaw-llm-bridge = { path = "../cyberclaw-llm-bridge", optional = true }
+cyberclaw-connectors = { workspace = true, optional = true }
+
+[features]
+default = []
+# 启用 Tool Calling 支持
+tool-calling = ["cyberclaw-llm-bridge", "cyberclaw-connectors"]

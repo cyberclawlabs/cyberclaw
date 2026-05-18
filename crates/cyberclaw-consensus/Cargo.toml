@@ -1,0 +1,36 @@
+[package]
+name = "cyberclaw-consensus"
+version = "0.1.0"
+edition = "2021"
+authors = ["CyberClaw Team"]
+description = "Raft-based distributed consensus for CyberClaw platform"
+repository = "https://github.com/cyberclawlabs/cyberclaw"
+license = "Apache-2.0"
+keywords = ["consensus", "raft", "distributed", "cyberclaw"]
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+tonic = "0.11"
+prost = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+rand = "0.8"
+tracing = "0.1"
+futures = "0.3"
+bytes = "1.5"
+
+[build-dependencies]
+tonic-build = "0.11"
+
+[dev-dependencies]
+tempfile = "3.0"
+tracing-subscriber = "0.3"
+criterion = "0.5"
+
+# [[bench]]
+# name = "raft_bench"
+# harness = false

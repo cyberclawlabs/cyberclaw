@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+exclude = ["fuzz"]
+members = [
+  "apps/cyberclaw-server",
+  "apps/cyberclaw-cli",
+  "crates/cyberclaw-core",
+  "crates/cyberclaw-control-plane",
+  "crates/cyberclaw-agent-runtime",
+  "crates/cyberclaw-workflow",
+  "crates/cyberclaw-governance",
+  "crates/cyberclaw-observability",
+  "crates/cyberclaw-connectors",
+  "crates/cyberclaw-skill-runtime",
+  "crates/cyberclaw-store",
+  "crates/cyberclaw-scheduler",
+  "crates/cyberclaw-plugin-runtime",
+  "crates/cyberclaw-llm",
+  "crates/cyberclaw-llm-bridge",
+  "crates/cyberclaw-consensus",
+  "crates/cyberclaw-memory-extraction",
+]
+
+[workspace.package]
+version = "1.2.16"
+edition = "2021"
+authors = ["CyberClaw Labs <info@cyberclawlabs.ai>"]
+license = "Apache-2.0"
+homepage = "https://cyberclawlabs.ai"
+repository = "https://github.com/cyberclawlabs/cyberclaw"
+description = "Controlled agent platform — Agent / Skill / Connector / Capability / Platform Plugin"
+# Internal workspace crates are not meant to be published to crates.io.
+# This satisfies cargo-deny's wildcard-path check (`path = "..."` deps
+# without versions are only valid for non-published crates) and prevents
+# accidental `cargo publish` from a release script. Individual crates
+# can opt-in to publishing by setting `publish = true` (or specific
+# registries) in their own Cargo.toml.
+publish = false
+
+[workspace.dependencies]
+aho-corasick = "1.1"
+anyhow = "1.0"
+loom = { version = "0.7", features = ["checkpoint"] }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+futures = "0.3"
+glob = "0.3"
+notify = "6.1"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "1.0"
+tokio = { version = "1.36", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+unicode-normalization = "0.1"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+walkdir = "2.4"
+cyberclaw-core = { path = "crates/cyberclaw-core" }
+cyberclaw-control-plane = { path = "crates/cyberclaw-control-plane" }
+cyberclaw-agent-runtime = { path = "crates/cyberclaw-agent-runtime" }
+cyberclaw-workflow = { path = "crates/cyberclaw-workflow" }
+cyberclaw-governance = { path = "crates/cyberclaw-governance" }
+cyberclaw-observability = { path = "crates/cyberclaw-observability" }
+cyberclaw-connectors = { path = "crates/cyberclaw-connectors" }
+cyberclaw-skill-runtime = { path = "crates/cyberclaw-skill-runtime" }
+cyberclaw-store = { path = "crates/cyberclaw-store", features = ["sqlite"] }
+cyberclaw-scheduler = { path = "crates/cyberclaw-scheduler" }
+cyberclaw-plugin-runtime = { path = "crates/cyberclaw-plugin-runtime" }
+cyberclaw-llm = { path = "crates/cyberclaw-llm" }
+cyberclaw-llm-bridge = { path = "crates/cyberclaw-llm-bridge" }
+cyberclaw-consensus = { path = "crates/cyberclaw-consensus" }

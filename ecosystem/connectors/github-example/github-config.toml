@@ -1,0 +1,62 @@
+# GitHub Connector 配置示例
+
+[connector]
+id = "github"
+name = "GitHub Connector"
+version = "1.0.0"
+description = "GitHub API integration connector"
+runtime = "native"
+
+# 认证配置
+[auth]
+# 方法 1: Personal Access Token (推荐用于开发)
+# 从 https://github.com/settings/tokens 创建 token
+# 需要的权限: repo, read:user, read:org
+type = "token"
+token = "${GITHUB_TOKEN}"
+
+# 方法 2: OAuth App (用于生产环境)
+# type = "oauth"
+# client_id = "${GITHUB_CLIENT_ID}"
+# client_secret = "${GITHUB_CLIENT_SECRET}"
+
+# 速率限制配置
+[rate_limit]
+# 每分钟最大请求数 (GitHub 限制: 5000/hour ≈ 83/min)
+# 建议设置稍低于限制以留有余量
+permits_per_minute = 80
+
+# 能力配置
+[[capabilities]]
+id = "github.create_issue"
+enabled = true
+
+[[capabilities]]
+id = "github.create_pr"
+enabled = true
+# 需要更高的权限
+required_scopes = ["repo"]
+
+[[capabilities]]
+id = "github.review_code"
+enabled = true
+
+[[capabilities]]
+id = "github.list_repos"
+enabled = true
+
+[[capabilities]]
+id = "github.search_code"
+enabled = true
+
+# 高级配置
+[advanced]
+# 超时设置 (毫秒)
+default_timeout_ms = 30000
+
+# 重试配置
+max_retries = 3
+retry_backoff_ms = 1000
+
+# 日志级别
+log_level = "info"

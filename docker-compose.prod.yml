@@ -1,0 +1,109 @@
+# ============================================
+# docker-compose.prod.yml - 生产环境配置
+# ============================================
+# 覆盖 docker-compose.yml 中的开发配置，适用于生产部署
+#
+# 使用方法：
+#   # 生产部署（使用预构建镜像）
+#   docker-compose -f docker-compose.prod.yml up -d
+#
+#   # 查看服务状态
+#   docker-compose -f docker-compose.prod.yml ps
+#
+#   # 滚动重启（不停服）
+#   docker-compose -f docker-compose.prod.yml up -d --no-deps cyberclaw-server
+#
+# 生产环境必需变量（必须通过外部密钥管理系统注入）：
+#   JWT_SECRET              - 强随机密钥（至少 64 字符）
+#   LLM_API_KEY             - LLM 服务 API Key
+#   LLM_PROVIDER            - LLM 提供商名称
+#   LLM_BASE_URL            - LLM API 端点
+#
+# TLS 配置（启用 HTTPS 时需要）：
+#   USE_TLS=true 时，必须挂载 ./certs/ 目录，包含：
+#   - cert.pem   : TLS 证书（PEM 格式）
+#   - key.pem    : TLS 私钥（PEM 格式）
+
+services:
+  cyberclaw-server:
+    # 生产环境使用已标记的镜像，不在部署时构建
+    image: cyberclaw-server:${IMAGE_TAG:-latest}
+    container_name: cyberclaw-server-prod
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      # LLM 配置（从外部注入，不设默认值）
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+
+      # 安全配置（生产环境强制外部注入）
+      - JWT_SECRET=${JWT_SECRET}
+
+      # TLS 配置
+      - USE_TLS=${USE_TLS:-false}
+      - TLS_CERT_PATH=/certs/cert.pem
+      - TLS_KEY_PATH=/certs/key.pem
+
+      # 服务器配置
+      - CYBERCLAW_ADDR=0.0.0.0:3000
+      - CYBERCLAW_TIMEOUT=30
+
+      # CORS（生产环境限制允许的源）
+      - CYBERCLAW_CORS_ORIGINS=${CYBERCLAW_CORS_ORIGINS:-}
+
+      # 速率限制（生产环境严格控制）
+      - RATE_LIMIT_PER_SECOND=${RATE_LIMIT_PER_SECOND:-1}
+      - RATE_LIMIT_BURST_SIZE=${RATE_LIMIT_BURST_SIZE:-60}
+
+      # 日志级别（生产环境只记录 info 及以上）
+      - RUST_LOG=info
+      - RUST_BACKTRACE=0
+
+      # 运行环境标识
+      - ENVIRONMENT=production
+
+    volumes:
+      # TLS 证书目录（只读挂载）
+      - ./certs:/certs:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+    # 生产环境：始终重启
+    restart: always
+
+    # 日志配置（生产环境限制日志大小）
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+    # 资源限制（防止单容器耗尽宿主机资源）
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      # 滚动更新策略
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      # 重启策略
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s

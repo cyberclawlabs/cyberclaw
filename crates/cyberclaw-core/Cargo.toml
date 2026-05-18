@@ -1,0 +1,31 @@
+[package]
+name = "cyberclaw-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-test = "0.4"
+criterion = "0.5"
+loom = { workspace = true }
+proptest = "1.0"
+tempfile = "3"
+
+[[bench]]
+name = "memory_bench"
+harness = false

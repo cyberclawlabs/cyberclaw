@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyberclaw.io/platform-hook.v2.schema.json",
+  "type": "object",
+  "required": ["event", "phase", "handler"],
+  "properties": {
+    "event": { "type": "string" },
+    "phase": {
+      "type": "string",
+      "enum": ["before", "after", "around"]
+    },
+    "handler": { "type": "string" }
+  },
+  "additionalProperties": false
+}

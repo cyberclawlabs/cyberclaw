@@ -1,0 +1,7 @@
+[skill]
+name = "OpenClaw Example Skill"
+version = "3.0.0"
+description = "Example skill demonstrating OpenClaw TOML format"
+author = "OpenClaw Development Team"
+homepage = "https://openclaw.example.org"
+tags = ["example", "openclaw", "toml", "automation"]

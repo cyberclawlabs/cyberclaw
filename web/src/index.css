@@ -1,0 +1,231 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* === 主题（从 v1 cyberclaw.html 完整 port） === */
+:root {
+  --accent-h: 243;
+  --accent-s: 75%;
+  --accent-l: 59%;
+  --accent: hsl(var(--accent-h) var(--accent-s) var(--accent-l));
+  --accent-fg: #fff;
+  --accent-soft: hsl(var(--accent-h) var(--accent-s) var(--accent-l) / 0.12);
+  --accent-ring: hsl(var(--accent-h) var(--accent-s) var(--accent-l) / 0.35);
+}
+.light {
+  --bg: #fafafa;
+  --bg-2: #ffffff;
+  --bg-3: #f4f4f5;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --fg: #09090b;
+  --fg-2: #3f3f46;
+  --fg-3: #71717a;
+  --fg-4: #a1a1aa;
+  --hover: #f4f4f5;
+}
+.dark, html:not(.light):not(.midnight):not(.sepia) {
+  --bg: #0a0a0b;
+  --bg-2: #111113;
+  --bg-3: #17171a;
+  --border: #242428;
+  --border-strong: #2e2e33;
+  --fg: #f4f4f5;
+  --fg-2: #c8c8cf;
+  --fg-3: #8a8a93;
+  --fg-4: #5a5a63;
+  --hover: #18181b;
+}
+/* Midnight — high-contrast deep dark (OLED-friendly, AAA contrast). */
+.midnight {
+  --bg: #000000;
+  --bg-2: #060608;
+  --bg-3: #0d0d10;
+  --border: #1d1d22;
+  --border-strong: #2a2a30;
+  --fg: #ffffff;
+  --fg-2: #d4d4dc;
+  --fg-3: #9a9aa3;
+  --fg-4: #65656d;
+  --hover: #121215;
+}
+/* Sepia — warm low-contrast cream (long-read comfort, paper-like). */
+.sepia {
+  --bg: #f4ecd8;
+  --bg-2: #fbf6e6;
+  --bg-3: #ede4cd;
+  --border: #d8cba6;
+  --border-strong: #c3b591;
+  --fg: #3b2e16;
+  --fg-2: #5a4a2f;
+  --fg-3: #7a6948;
+  --fg-4: #9a8a65;
+  --hover: #e8debf;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+}
+body {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11','ss01','ss03';
+}
+.mono {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-feature-settings: 'zero','ss01';
+}
+
+/* scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* utility tokens — 与 v1 同名同义；用 background-color (非 shorthand)
+   避免抹掉子元素的 background-image（如 select 的自定义 arrow）。 */
+.bg-bg { background-color: var(--bg); }
+.bg-bg-2 { background-color: var(--bg-2); }
+.bg-bg-3 { background-color: var(--bg-3); }
+.bg-hover:hover { background-color: var(--hover); }
+.text-fg { color: var(--fg); }
+.text-fg-2 { color: var(--fg-2); }
+.text-fg-3 { color: var(--fg-3); }
+.text-fg-4 { color: var(--fg-4); }
+.border-border { border-color: var(--border); }
+.border-border-strong { border-color: var(--border-strong); }
+.text-accent { color: var(--accent); }
+.bg-accent { background: var(--accent); color: var(--accent-fg); }
+.bg-accent-soft { background: var(--accent-soft); color: var(--accent); }
+
+.focus-ring:focus { outline: 2px solid var(--accent-ring); outline-offset: 2px; }
+
+::selection { background: var(--accent-soft); color: var(--accent); }
+
+/* === Table cells 长内容自动 wrap，避免横向溢出 ===
+   Audit target / capability description / tool description 都是长字符串。
+   table-layout: fixed 强制按预设列宽布局（不让长内容拉伸 column），
+   配合 td 的 overflow-wrap 让长字符串折行。 */
+table {
+  table-layout: fixed;
+  width: 100%;
+}
+table td, table th {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+/* mono 文本（id/path）允许在任意字符断行 */
+table td.mono, table td .mono {
+  word-break: break-all;
+}
+
+/* === Select 元素全局重置 ===
+   原生 macOS select 在 dark theme 下渲染异常（文字被划线、arrow 在 dark
+   bg 上不可见）。统一去原生 chrome + 自定义 SVG arrow 保持视觉一致。
+   适用所有 v2 stack 的 <select>。 */
+select, input, textarea, button {
+  /* user-agent stylesheet 给 form 元素一套独立 font (13.333px Arial)，
+     不继承父容器。Tailwind 的 text-xs/sm utility 也不会向 form 元素
+     渗透（因为 form 控件的 font 被浏览器锁定）。强制 font-family +
+     色 + 减小默认字号让 v2 dense admin layout 整页字号一致。
+     单个组件需要更大字号时仍可用 Tailwind text-base 之类的 utility
+     覆盖（utility 比此规则 specificity 更高）。 */
+  font-family: inherit;
+  color: inherit;
+  font-size: 0.75rem; /* 12px = Tailwind text-xs，与 v2 page label (text-[11px]/text-xs) 视觉对齐 */
+  font-weight: inherit;
+}
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath fill='%238a8a93' d='M4 5L0 0h8z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 8px 5px;
+  padding-right: 20px !important;
+  /* h-7 / h-9 等 Tailwind 高度类没设 line-height，浏览器默认 normal
+     在 28px 高度容器里会被切（文字像被划线）。强 line-height + color
+     + text-align 修复 dark theme 渲染。 */
+  line-height: 1.2;
+  color: var(--fg);
+  text-align: left;
+  vertical-align: middle;
+}
+select::-ms-expand { display: none; }
+/* option 在大多数 browser 也跟系统色，无法 100% 控制；至少在 Chrome 上
+   下面这条让 option 背景跟随主题。Safari 不支持，仍走系统。 */
+select option {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+
+/* 动画 */
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.anim-fade-in { animation: fade-in .18s ease-out; }
+@keyframes slide-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+.anim-slide-up { animation: slide-up .22s ease-out; }
+
+/* shimmer skeleton for loading states */
+@keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-3) 25%, var(--bg-2) 50%, var(--bg-3) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+/* P2-1 a11y: respect prefers-reduced-motion. Browser/OS-level user preference
+   (Win Settings → Ease of Access → Display → Reduce motion; macOS Settings →
+   Accessibility → Display → Reduce motion). Disable opacity/transform animation
+   but keep shimmer at a slow static fade to avoid jarring step. */
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-in,
+  .anim-slide-up {
+    animation: none;
+  }
+  .skeleton {
+    animation: shimmer 4s linear infinite;
+  }
+  /* Override any global transitions added via Tailwind utility classes. */
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* === markdown-body — ported from v1 cyberclaw.html lines 170-211 === */
+.markdown-body { line-height: 1.65; }
+.markdown-body h1,.markdown-body h2,.markdown-body h3,
+.markdown-body h4,.markdown-body h5,.markdown-body h6 {
+  font-weight: 600; margin: 0.75em 0 0.4em; color: var(--fg);
+}
+.markdown-body h1 { font-size: 1.25em; }
+.markdown-body h2 { font-size: 1.1em; }
+.markdown-body h3 { font-size: 1em; }
+.markdown-body p { margin: 0.4em 0; }
+.markdown-body ul,.markdown-body ol { padding-left: 1.4em; margin: 0.4em 0; }
+.markdown-body li { margin: 0.2em 0; }
+.markdown-body code:not(pre code) {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.85em; background: var(--bg-3); padding: 1px 5px;
+  border-radius: 3px; color: var(--accent);
+}
+.markdown-body pre {
+  background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: 6px; padding: 12px 14px; overflow-x: auto;
+  margin: 0.6em 0; font-size: 0.82em;
+}
+.markdown-body pre code { background: none; padding: 0; color: inherit; font-size: inherit; font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; }
+.markdown-body blockquote {
+  border-left: 3px solid var(--accent); margin: 0.5em 0;
+  padding: 2px 12px; color: var(--fg-3); font-style: italic;
+}
+.markdown-body table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.9em; table-layout: auto; }
+.markdown-body th,.markdown-body td {
+  border: 1px solid var(--border); padding: 5px 10px; text-align: left; overflow-wrap: normal; word-break: normal;
+}
+.markdown-body th { background: var(--bg-3); font-weight: 600; }
+.markdown-body a { color: var(--accent); text-decoration: underline; }
+.markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyberclaw.io/skill-spec.v2.schema.json",
+  "type": "object",
+  "required": ["format", "entryFile"],
+  "properties": {
+    "format": { "type": "string", "enum": ["claude-compatible"] },
+    "entryFile": { "type": "string" },
+    "scriptsDir": { "type": "string" },
+    "referencesDir": { "type": "string" },
+    "assetsDir": { "type": "string" },
+    "suggestedAgents": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "requiredCapabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "suggestedConnectors": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "workflowTemplates": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+  },
+  "additionalProperties": true
+}
