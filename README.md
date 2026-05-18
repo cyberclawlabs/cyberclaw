@@ -134,9 +134,16 @@ CyberClaw's core architecture draws on a body of academic work and open-source p
 **Concepts and projects drawn from:**
 - [Anthropic Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — protocol design for tool integration.
 - [OpenTelemetry](https://opentelemetry.io/) — trace format and export conventions.
-- [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://github.com/openclaw/openclaw) — multi-agent architecture and Skill concept references.
+- [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent) — closest spiritual peer; benchmarked against for autopilot, scheduled triggers, cross-session memory, sub-agent delegation.
+- [ralph](https://github.com/snarktank/ralph) — persistent "loop until done" pattern; direct ancestor of CyberClaw's PersistentExecution module.
+- [OpenClaw](https://github.com/openclaw/openclaw) and [OpenClaw-RL](https://github.com/Gen-Verse/OpenClaw-RL) — `claw` family lineage, SOUL.md role definition, approval-gate pattern, self-evolution direction.
+- [NanoClaw](https://github.com/qwibitai/nanoclaw) — file-based memory + container-isolation pattern.
+- [IronClaw-NearAI](https://github.com/nearai/ironclaw) — Rust agent with WASM sandbox + policy engine; architectural sibling.
+- [Cline](https://github.com/cline/cline) and [OpenCode](https://github.com/anomalyco/opencode) — human-in-the-loop UX, MCP integration patterns, client/server split.
 - HashiCorp Sentinel / Open Policy Agent — policy-as-code and declarative governance.
 - AWS IAM — capability-based authorization semantics.
+
+**Development harness:** [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) — the multi-agent orchestration layer CyberClaw was developed inside. Skills like `autopilot`, `ralph`, `team`, and `ai-slop-cleaner` drove the v1.2.16 release gates.
 
 **Primary dependencies:** Tokio, Axum, Serde, Tracing, Prometheus, subtle, HMAC/SHA-2, Reqwest (Rust side); React, TypeScript, Vite, Tailwind CSS (frontend).
 

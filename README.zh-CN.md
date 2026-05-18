@@ -134,9 +134,16 @@ CyberClaw 的核心架构参考了一系列学术成果与开源项目。
 
 - [Anthropic Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — 工具接入的协议设计参考。
 - [OpenTelemetry](https://opentelemetry.io/) — 链路追踪的格式与导出规范。
-- [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent)、[OpenClaw](https://github.com/openclaw/openclaw) — 多 Agent 架构与 Skill 概念的演进参考。
+- [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent) — 精神最相近的同类；autopilot、定时触发、跨会话记忆、子代理委派的对照基准。
+- [ralph](https://github.com/snarktank/ralph) — "持续循环到任务完成"的范式；CyberClaw PersistentExecution 模块的直系祖先。
+- [OpenClaw](https://github.com/openclaw/openclaw) 与 [OpenClaw-RL](https://github.com/Gen-Verse/OpenClaw-RL) — `claw` 系命名脉络、SOUL.md 角色定义、approval-gate 模式、自演化方向。
+- [NanoClaw](https://github.com/qwibitai/nanoclaw) — 文件基记忆 + 容器隔离模式。
+- [IronClaw-NearAI](https://github.com/nearai/ironclaw) — Rust 实现的企业 Agent，WASM 沙箱 + policy engine 的架构同行。
+- [Cline](https://github.com/cline/cline) 与 [OpenCode](https://github.com/anomalyco/opencode) — Human-in-the-loop UX、MCP 集成模式、Client/Server 拆分。
 - HashiCorp Sentinel / OPA — Policy-as-Code 与声明式治理思想。
 - AWS IAM — Capability-based authorization 的语义参考。
+
+**开发 Harness：** [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) — CyberClaw 就是在这套多代理编排层上面开发的。`autopilot` / `ralph` / `team` / `ai-slop-cleaner` 等 skill 驱动了 v1.2.16 发布闭环。
 
 **主要依赖：** Tokio、Axum、Serde、Tracing、Prometheus、subtle、HMAC/SHA-2、Reqwest（Rust 端）；React、TypeScript、Vite、Tailwind CSS（前端）。
 
