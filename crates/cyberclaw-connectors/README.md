@@ -135,7 +135,7 @@ Count 模式的旧 fallback 路径返回的是文件数，不是匹配行数。�
 
 **文件**: `src/runtime/container.rs`，commit `957d435`
 
-容器内工作区不再挂载为 `/workspace`，而是以宿主机真实路径 1:1 挂载（如 `/Users/max/project/foo` → `/Users/max/project/foo`）。容器内的绝对路径引用因此可以直接使用宿主机路径，无需路径转换。依赖 `/workspace` 前缀的调用方需更新为宿主机路径。
+容器内工作区不再挂载为 `/workspace`，而是以宿主机真实路径 1:1 挂载（如 `/home/alice/project/foo` → `/home/alice/project/foo`）。容器内的绝对路径引用因此可以直接使用宿主机路径，无需路径转换。依赖 `/workspace` 前缀的调用方需更新为宿主机路径。
 
 ## 新增模块 (2026-03-21)
 

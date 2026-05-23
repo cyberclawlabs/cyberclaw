@@ -11,18 +11,18 @@ identify them in their headers.
 For academic citations and standards references, see
 [CITATIONS.md](CITATIONS.md).
 
-## Research influence
+## Research influence (academic)
 
 The system's shape was informed by ongoing work in agentic systems,
 governable autonomy, persistent execution, and structured agent
-memory. Among the works we read most closely:
+memory. Among the academic works we read most closely:
 
 - **HyperAgents** (arXiv:2603.19461) — multi-agent orchestration,
   role specialization, sub-agent budget contracts. Reflected in
   `crates/cyberclaw-agent-runtime/src/sub_agent.rs`.
 - **MemOS** — operating-system framing for agent memory, the L0/L1/L2
-  tier model, procedural-memory-as-files. Reflected in
-  `docs/architecture/memory/`.
+  tier model, procedural-memory-as-files. Reflected in the tiered
+  memory implementation in `crates/cyberclaw-store/`.
 - **Reflexion** (arXiv:2303.11366) — verifier-feedback retry pattern.
   Reflected in `crates/cyberclaw-control-plane/src/persistent_loop.rs`.
 - **MemGPT** (arXiv:2310.08560) — hierarchical context management.
@@ -32,6 +32,85 @@ memory. Among the works we read most closely:
 - **Constitutional AI** (arXiv:2212.08073) — background for the
   iron-law approach to non-rationalizable governance rules in
   `crates/cyberclaw-governance/`.
+
+## Architectural comparison (open-source projects)
+
+Before settling on the five-object model, we did a side-by-side
+comparison of how peer projects organize memory, sandboxing, and
+governance. The internal write-up (`REFERENCE_PROJECTS_ANALYSIS.md`)
+mapped each of these to specific design decisions in CyberClaw:
+
+- **[NanoClaw](https://github.com/qwibitai/nanoclaw)** — file-based memory
+  (`CLAUDE.md` per-group) + SQLite episodic memory + container
+  isolation per session. Influenced CyberClaw's procedural-memory-as-
+  files pattern and the per-agent isolation boundary.
+- **[openclaw](https://github.com/openclaw/openclaw)** — SOC threat-
+  hunting agent. The `approval_gate` pattern and chain-log audit
+  shape directly inform CyberClaw's review queue + hash-chained audit
+  log.
+- **[IronClaw-NearAI](https://github.com/nearai/ironclaw)** —
+  Rust-implemented enterprise agent. PostgreSQL + pgvector hybrid
+  search (RRF), WASM + Docker sandbox layering, and the policy engine
+  contract are all reference points for `cyberclaw-governance` and
+  the Connector dispatcher.
+- **[Cline](https://github.com/cline/cline)** — VS Code agent.
+  Workspace snapshots, human-in-the-loop UX, and MCP integration
+  patterns reflected in the approval card flow and MCP tool bridge.
+- **[OpenCode](https://github.com/anomalyco/opencode)** — open-source coding
+  agent. Client/server architecture and LSP/Effect framework boundaries
+  informed our split between control-plane and connectors.
+
+## Self-evolution and persistent execution lineage
+
+CyberClaw's autopilot, persistent loop, and skill evolution paths sit
+in a specific lineage of "agent that improves while it runs":
+
+- **[ralph](https://github.com/snarktank/ralph)** — the canonical
+  "loop until the task is done" pattern. CyberClaw's PersistentExecution
+  module (`crates/cyberclaw-control-plane/src/persistent_loop.rs`) is
+  a direct conceptual descendant. The name "ralph" survives as a first-
+  class OMC skill in our dev harness.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** —
+  Nous Research's autonomous self-evolving agent. Spirit and
+  capability surface (sub-agent delegation, scheduled triggers → IM
+  delivery, cross-session semantic memory) is what we benchmarked
+  against. See `apps/cyberclaw-server/tests/e2e_evolution_test.rs` and
+  `e2e_daily_digest_test.rs`.
+- **[Hermes Agent self-evolution](https://github.com/NousResearch/hermes-agent-self-evolution)**
+  — the explicit self-improvement extension that pushed us to ship
+  cyberclaw's skill-evolution endpoint at GA.
+- **[Hermes WebUI](https://github.com/nesquena/hermes-webui)** —
+  a reference for how a long-running autonomous agent surfaces its
+  state to a human operator.
+- **[Evolver](https://github.com/EvoMap/evolver)** — evolutionary
+  optimization framework. Useful comparison for the tournament-style
+  skill-evolution path.
+- **[OpenClaw-RL](https://github.com/Gen-Verse/OpenClaw-RL)** — RL
+  variant of OpenClaw. Reference for treating agent improvement as
+  a closed-loop training problem rather than only prompt-engineering.
+
+## Development harness
+
+CyberClaw itself was developed inside an agentic harness:
+
+- **[oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode)**
+  (OMC) — multi-agent orchestration layer that runs on top of
+  Claude Code. The autopilot / ralph / team / ai-slop-cleaner skills
+  used during cyberclaw's development came from here, and several of
+  them were migrated into `ecosystem/skills/` under their original
+  licenses. The release acceptance gates in
+  `docs/implementation/release/v1.2.16-acceptance-plan.md` were driven
+  by OMC modes.
+- **[Superpowers](https://github.com/obra/superpowers)** — composable
+  skill library for coding agents. Origin of the `brainstorming`,
+  `test-driven-development`, and `subagent-driven-development` skills
+  in `ecosystem/skills/`.
+
+## Also read
+
+Projects that informed our taxonomy but did not become a direct
+borrow: AReaL, EverOS, gbrain, OpenSpace, OpenViking, paseo,
+cc-connect, autoresearch, deer-flow.
 
 ## Skill ecosystem provenance
 

@@ -57,13 +57,7 @@ When reporting an issue, please distinguish whether the concern affects:
 
 ## Security-Related Documentation
 
-For additional context, see:
-
-- [Security & Governance Docs](docs/security/README.md)
-- [Implementation Security Docs](docs/implementation/security/README.md)
-- [Pre-launch Review](docs/implementation/reports/pre-launch-review-2026-04-15.md)
-- [v1.0 GA Safety Matrix (25 vectors)](docs/implementation/reports/v1.0-ga-safety-matrix.md)
-- [v1.0 GA Final Readiness](docs/implementation/reports/v1.0-ga-final-readiness-2026-05-15.md)
+For additional context, see the [Security architecture section](docs/ARCHITECTURE.md#security-architecture) of the architecture document.
 
 ## Sandbox Architecture (v1.0+)
 

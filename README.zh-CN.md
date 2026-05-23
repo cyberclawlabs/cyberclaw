@@ -1,199 +1,167 @@
 # CyberClaw
 
-- Status: Active
-- Scope: Repository
-- Owner: CyberClaw Maintainers
-- Last Updated: 2026-04-18
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge" alt="License"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.75%2B-orange?style=for-the-badge&logo=rust&logoColor=white" alt="Rust"></a>
+  <a href="docs/README.md"><img src="https://img.shields.io/badge/Docs-portal-blueviolet?style=for-the-badge" alt="Docs"></a>
+  <a href="README.md"><img src="https://img.shields.io/badge/Lang-English-red?style=for-the-badge" alt="English"></a>
+</p>
 
-<div align="center">
+<p align="center"><strong>面向高风险业务环境的通用安全可控 Agent 平台。</strong></p>
 
-**面向高风险真实业务系统的可治理 Agent 基础设施**
+> ⚠ **状态：Beta，研究与开发阶段，不要在此阶段把真实资金、生产数据库或对外业务系统接入 CyberClaw**。
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-portal-blue.svg)](docs/README.md)
+CyberClaw 是一个 Agent 运行时，把治理、审计、身份认证与外部接入做成 Agent 通向真实系统的唯一路径。所有动作必经规则评估，必要时进入人工审批，并完整记录于可验证审计链。适用于安全运营、DevOps、Web3 等高风险的业务场景。
 
-[English](README.md) | [简体中文](README.zh-CN.md)
-
-</div>
+[文档](docs/README.md) · [快速开始](docs/GUIDE.md) · [English](README.md)
 
 ---
 
-### CyberClaw 是什么？
+## 安全架构
 
-CyberClaw 不是为了做一个更会聊天的 Agent，而是为了让 Agent 在高风险、真实业务系统中参与分析、协同和执行时，仍然保持安全、可控、可审计。
+安全不是 CyberClaw 的附加层，而是从编程语言、运行时到接口的原生设计——任何 Agent 通向外部世界的动作，都得逐层穿过：
 
-它面向已经开始把 AI 接入真实流程的团队，但不能接受“让模型直接触碰生产系统”。安全团队可以用它组织代码审计、告警分诊、事件处置和审计追踪；AI 团队可以用它把 Agent 从 Demo 带到生产；小团队也可以借此形成接近“一人安全中心”的工作方式，在有限人力下提升研判、响应和运营效率。
+- **语言层** — Rust 实现。内存安全、零数据竞争由编译器静态保证；buffer overflow、use-after-free、悬挂指针等整类漏洞被消除。
+- **沙箱与执行隔离** — 同一 Capability 可在多种运行时执行（本地、独立进程、容器、远程）。高风险动作默认走容器隔离；单个 Agent 故障或被攻陷不污染其他 Agent。
+- **模型层** — 部分系统提示词由服务端固定，模型无法改写。
+- **输入输出层** — 工具返回先经过 prompt-injection 与凭据扫描，再进入模型上下文。
+- **执行层** — 升权模式下自动撤销高风险能力，连续失败强制退出。
+- **接口层** — 文件与网络的边界写在代码里，规则配错也无法突破。
+- **鉴权层** — 防时序攻击的密码学比较，外部 webhook 强制签名验证。
+- **审计层** — 每个动作生成密码学链式记录，任何篡改可被检测。
 
-CyberClaw 的核心不是多接几个工具，而是把推理、执行、治理、审计和外部系统接入拆成清晰边界，让自动化建立在受控执行、策略约束、审批链路和可追踪产物之上。
 
-CyberClaw 是通用可治理 Agent 平台，`Web3` 是当前最强落地场景。在钱包、Signer、金库、多签、链上运营和异常处置等环境中，治理和执行边界不是附加能力，而是前提条件。
+## 五个对象
 
-### 核心场景
 
-#### Web3 核心场景
+|                                       |                                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------- |
+| **Agent（智能体）**             | 谁在做。每个 Agent 有自己的身份、信任级别、预算                           |
+| **Skill（技能）**               | 这个角色具体怎么做事。例如"代码审查方法"、"事件响应剧本"                  |
+| **Connector（连接器）**         | 通向外部世界的接口。一个 Connector 对接一种系统（数据库、钱包、Slack 等） |
+| **Capability（能力）**          | 一次具体的操作。例如"写文件"、"签一笔交易"、"发一条消息"                  |
+| **Platform Plugin（平台插件）** | 平台级扩展。例如把审计数据导出到企业 SIEM                                 |
 
-CyberClaw 重点面向这类 Web3 工作流：
+## 一次 Agent 执行动作的流程
 
-- 金库与多签流程：执行前需要上下文汇总、风险判断、审批和留痕
-- Signer 门禁与链上 runbook：把策略、执行和审计拆开，而不是直接发起交易
-- 协议运营与治理协同：统一链上动作、外部系统和内部审批
-- 链上异常处置：组织告警、升级、响应和后续审计
+当 Agent 想做点什么——例如"把报告写到磁盘"——发生的是这样：
 
-#### 其他高价值场景
+1. **请求**：Agent 说"我要调 `fs.write`，文件名是 X，内容是 Y，原因是 Z"。
+2. **裁决**：治理引擎查规则，决定这次调用是放行、拒绝，还是要人工审批。
+3. **执行与记录**：放行后由对应 Connector 执行；执行结果先过内容检测（防恶意注入），然后整条链路——请求、裁决、结果——写进一条不可篡改的审计记录。
+4. **审计**：每次 Agent 动作生成一行记录：谁请求了什么、规则怎么裁决、结果是什么。每行用密码学方式相互链接，任何篡改可被检测到。可一键校验整条链。
 
-同样的控制模型也适合：
 
-- 代码审计与 PR 风险检查
-- 告警分诊、升级和安全事件处置
-- 发布门禁、回滚提案和变更审批
-- 数据库查询、写入、事务和迁移门禁
+## 使用场景
 
-#### 当前仓库中的现有支撑
+- **安全运营** — 告警量永远多过分析师，但又不敢让 AI 真去操作。CyberClaw 让 Agent 在策略边界内做告警分诊、事件响应、PR 风险审查。"Agent 起草、SOC 审批"从 demo 变成可上线的工作流。
+- **DevOps 与变更** — 发版门禁、数据库迁移、变更审批长期由人盯。Agent 起草 PR 已经常见，但敢把合并权交给它的不多。CyberClaw 让 Agent 跑完整流程、最后一步交人审批，并自动产出 SOX/SOC2 需要的操作记录。
+- **Web3** — 多签流水、国库划转、链上 runbook 一直是运维手动跑。在 CyberClaw 上，Agent 起草交易、组织上下文、提交执行计划；签名权限由治理规则决定能否走下一步；每笔动作上链时同步落审计——链上链下证据合一。
 
-当前仓库已经包含与这些场景直接相关的连接器和文档入口：
+## 截图
 
-- GitHub Connector 示例：Issue、PR、代码审查、仓库查询
-- Slack Connector 示例：消息发送、频道创建、文件上传
-- Database Connector 示例：查询、写入、事务、迁移
-- 部署文档：部署、健康检查、生产配置
-- 审计与安全基础设施：audit 插件、security event、observability 文档
+<table>
+<tr>
+  <td><img src="assets/screenshots/tui-chat-idle.png" alt="TUI 聊天界面"></td>
+  <td><img src="assets/screenshots/tui-tool-call.png" alt="TUI 工具调用展示"></td>
+</tr>
+<tr>
+  <td align="center"><sub>TUI · 聊天界面</sub></td>
+  <td align="center"><sub>TUI · 工具调用</sub></td>
+</tr>
+<tr>
+  <td><img src="assets/screenshots/webui-agents-list.png" alt="WebUI Agent 列表"></td>
+  <td><img src="assets/screenshots/webui-trace-detail.png" alt="WebUI 链路追踪详情"></td>
+</tr>
+<tr>
+  <td align="center"><sub>WebUI · Agent 列表</sub></td>
+  <td align="center"><sub>WebUI · 链路追踪</sub></td>
+</tr>
+<tr>
+  <td><img src="assets/screenshots/webui-memory-browse.png" alt="WebUI 记忆浏览器"></td>
+  <td><img src="assets/screenshots/webui-skill-marketplace.png" alt="WebUI Skill 市场"></td>
+</tr>
+<tr>
+  <td align="center"><sub>WebUI · 记忆浏览</sub></td>
+  <td align="center"><sub>WebUI · Skill 市场</sub></td>
+</tr>
+</table>
 
-### 典型治理链路示例
-
-CyberClaw 适合承载的不是“模型直接调一堆工具”，而是这类有明确边界的真实流程：
-
-| 场景 | 示例链路 |
-|------|------|
-| Web3 金库 / 多签流程 | `Agent` 汇总余额、请求、Signer 上下文和策略输入；`Skill` 生成执行提案；治理链做审批和策略判断；钱包相关 `Connector` 只暴露被允许的 `Capability`；最后沉淀审批记录、追踪和执行产物。 |
-| 代码审计 / PR 风险检查 | `Agent` 收集 PR 上下文、变更文件和相关规范；`Skill` 组织审计方法；GitHub `Connector` 提供仓库协同面；MCP `mcp.prompt.code_review` 这类能力可生成审查模板；治理链限制后续写动作。 |
-| 告警分诊 / 升级 | `Agent` 拉取 trace、日志和相关仓库上下文；`Skill` 输出分诊结论；Slack `Connector` 负责升级通知，GitHub `Connector` 负责创建跟踪 Issue；治理链约束后续高风险动作。 |
-| 安全事件处置 | `Agent` 在分诊后提出隔离、升级、补丁协同或后续排查步骤；治理链对外部写入、运行任务和系统变更做门控；平台把告警、审批、动作和产物串成完整审计链路。 |
-| 发布门禁 / 变更审批 | `Agent` 组织发布清单、检查结果和回滚提案，并通过 GitHub + Slack 协同；涉及回滚、变更执行或生产动作时，治理链要求显式边界和审批。 |
-| 数据库变更门禁 | `Agent` 先分析 SQL、迁移计划和影响范围，再把执行请求交给 Database `Connector`；`db.query`、`db.execute`、`db.transaction`、`db.migrate` 风险不同，迁移类动作需要更强审批、隔离和留痕。 |
-
-### 从这里开始
-
-- [文档门户](docs/README.md)
-- [快速开始](docs/getting-started/README.md)
-- [开发者指引](docs/builders/README.md)
-- [安全与治理](docs/security/README.md)
-- [Web3 指引](docs/web3/README.md)
-- [Skill Hub MVP](docs/business/brand/SKILL_HUB_MVP.md)
-- [I18N 内容策略](docs/business/brand/I18N_CONTENT_STRATEGY.md)
-
-### 语言支持
-
-当前仓库入口层语言支持：
-
-- `en` - 默认开源入口语言
-- `zh-CN` - 维护中的中文入口语言
-
-公开站点近期扩展语种：
-
-- `ja`
-- `ko`
-- `es`
-
-### 适合谁？
-
-#### 使用者 / 集成者
-
-- 运行具有明确执行边界的 Agent
-- 接入 Skill 和 Connector，同时保持治理链不被绕过
-- 在 Web3 和其他高风险自动化场景中落地
-
-#### 生态构建者
-
-- 构建和发布 Skill、Connector、Platform Plugin
-- 复用平台的受控执行模型
-- 在不破坏五对象边界的前提下扩展平台
-
-### 快速开始
+## 快速开始
 
 ```bash
 git clone https://github.com/cyberclawlabs/cyberclaw.git
 cd cyberclaw
-cargo build
-cargo run -p cyberclaw-cli -- --help
+cp .env.example .env       # 配置 LLM_API_KEY 和 CYBERCLAW_APPROVAL_SECRET
+cargo run -p cyberclaw-server
+# 打开 http://127.0.0.1:38090/admin/v2/
 ```
 
-查看本地平台表面：
+生产部署（JWT 签发、TLS、多副本）见[使用指南](docs/GUIDE.md)。
 
-```bash
-cargo run -p cyberclaw-cli -- status
-```
+## 已支持
 
-### 为什么是 CyberClaw？
+- **LLM 提供商** — Anthropic、OpenAI、DeepSeek、MiniMax、火山方舟，以及任何 OpenAI 兼容端点。
+- **可接入的外部系统** — 文件系统、HTTP、浏览器、MCP 工具桥。
+- **消息平台** — Slack、Telegram、Discord、飞书、企业微信、LINE、通用 webhook。
+- **多 Agent 协作** — 子 Agent 委派、多数票汇总、多模型综合判断。
+- **可观测性** — 链路追踪导出（兼容 Jaeger、Datadog、Grafana 等）、Prometheus 指标。
+- **运维控制台** — React 管理界面，含登录、审批队列、审计查看器、与任意 Agent 实时对话；命令行配套。
+- **部署模式** — 单节点或 Raft 集群（多副本一致性 + 任务派发）。跨副本的分布式审批见路线图第二阶段。
 
-- 强调可治理执行，而不是无边界 agent 行为
-- 用 `Connector` 和 `Capability` 约束真实动作
-- 把审计、追踪、可观测性放进主链路
-- 提供可扩展的 Skill / Connector / Platform Plugin 生态面
-- 特别适合 Web3 及其他高风险环境
+## 路线图
 
-### 平台构件
+- **第一阶段 — 可用**（v1.x）：核心五对象、声明式治理、审计链、六个 IM 平台、多 LLM provider、自主执行模式与熔断。**已发布。**
+- **第二阶段 — 受治理**（v2.x 计划）：跨副本分布式审批、企业 IAM 接入、更细的权限划分、多租户隔离、合规模板（SOX / SOC2 / HIPAA）。
+- **第三阶段 — 可扩展生态**（v3.x 计划）：第三方 Connector / Skill / Plugin 注册中心、签名分发的 Skill、共享治理模板库。
 
-CyberClaw 围绕五个核心对象组织：
+## 贡献
 
-| 对象 | 职责 |
-|------|------|
-| `Agent` | 角色、编排、执行预算 |
-| `Skill` | 知识、方法、提示词、参考资料 |
-| `Connector` | 运行时与外部系统接入 |
-| `Capability` | 最小治理动作单元 |
-| `Platform Plugin` | 平台级增强钩子 |
+欢迎贡献：
 
-对外接入时，最容易理解的仍然是：
+- 新的 Connector（IM 平台、SaaS API、内部系统接入）
+- 新的 Skill（垂直领域方法、prompt 模板、知识包）
+- 治理规则模板（特定业务场景或合规框架）
+- 文档、示例、应用案例
 
-- `Skill`：怎么做
-- `Tool` 表面：平台如何对外暴露受控能力
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-但平台内部执行链保持不变：
+## 致谢与引用
 
-`Task/Case -> Resolver -> Execution -> Governance -> Connector -> Capability -> Artifact/Trace`
+CyberClaw 的核心架构参考了一系列学术成果与开源项目。
 
-### Web3 现阶段定位
+**借鉴的项目与概念：**
 
-CyberClaw 是通用平台，Web3 是当前最能体现其治理、安全、审计和风险控制价值的落地方向。
+- [Anthropic Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — 工具接入的协议设计参考。
+- [OpenTelemetry](https://opentelemetry.io/) — 链路追踪的格式与导出规范。
+- [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent) — 精神最相近的同类；autopilot、定时触发、跨会话记忆、子代理委派的对照基准。
+- [ralph](https://github.com/snarktank/ralph) — "持续循环到任务完成"的范式；CyberClaw PersistentExecution 模块的直系祖先。
+- [OpenClaw](https://github.com/openclaw/openclaw) 与 [OpenClaw-RL](https://github.com/Gen-Verse/OpenClaw-RL) — `claw` 系命名脉络、SOUL.md 角色定义、approval-gate 模式、自演化方向。
+- [NanoClaw](https://github.com/qwibitai/nanoclaw) — 文件基记忆 + 容器隔离模式。
+- [IronClaw-NearAI](https://github.com/nearai/ironclaw) — Rust 实现的企业 Agent，WASM 沙箱 + policy engine 的架构同行。
+- [Cline](https://github.com/cline/cline) 与 [OpenCode](https://github.com/anomalyco/opencode) — Human-in-the-loop UX、MCP 集成模式、Client/Server 拆分。
+- HashiCorp Sentinel / OPA — Policy-as-Code 与声明式治理思想。
+- AWS IAM — Capability-based authorization 的语义参考。
 
-查看 [Web3 指引](docs/web3/README.md)。
+**开发 Harness：** [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) — CyberClaw 就是在这套多代理编排层上面开发的。`autopilot` / `ralph` / `team` / `ai-slop-cleaner` 等 skill 驱动了 v1.2.16 发布闭环。
 
-### 文档入口
+**主要依赖：** Tokio、Axum、Serde、Tracing、Prometheus、subtle、HMAC/SHA-2、Reqwest（Rust 端）；React、TypeScript、Vite、Tailwind CSS（前端）。
 
-- [文档总索引](docs/INDEX.md)
-- [架构文档](docs/architecture/README.md)
-- [实施文档](docs/implementation/README.md)
-- [业务文档](docs/business/README.md)
-- [贡献指南](CONTRIBUTING.md)
-- [安全策略](SECURITY.md)
-- [变更记录](CHANGELOG.md)
+**迁移的 Skill 来源：** 仓库 `ecosystem/skills/` 中部分 Skill 在 Apache-2.0 / MIT 许可下从以下上游项目迁移并改写，每个 Skill 的 `SKILL.md` 头部注明了原始来源链接：
 
-### 当前状态
+- **obra/superpowers** — `brainstorming`、`test-driven-development`、`subagent-driven-development` 等
+- **oh-my-claudecode** — `debug`、`plan`、`verify`、`learner`、`skill`、`omc-reference`
+- **NousResearch/hermes-agent** — `daily-digest`、`requesting-code-review`、`spike`、`systematic-debugging`、`writing-plans`（其中部分由 hermes 二次改写自 obra/superpowers 与 gsd-build/get-shit-done）
+- **anthropics/skills** — `skill-creator`
 
-#### 已实现
+完整研究背景见 [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)；学术论文与标准引用见 [CITATIONS.md](CITATIONS.md)。
 
-- 核心平台 crate 与运行时基础层
-- 治理、可观测性、隔离执行基础能力
-- CLI 与 Server 入口
-- 较完整的架构与实施文档基础
+## 项目信息
 
-#### 正在建设
+- **主页** — [cyberclawlabs.ai](https://cyberclawlabs.ai)
+- **GitHub** — [github.com/cyberclawlabs/cyberclaw](https://github.com/cyberclawlabs/cyberclaw)
+- **安全报告与联系** — `info@cyberclawlabs.ai` · 详见 [SECURITY.md](SECURITY.md)
 
-- 面向开源访客的产品化文档层
-- 开源门面与外部叙事整理
-- Skill Hub 发现入口
-- 公开内容 i18n 化
+## License
 
-#### 路线图
-
-- `cyberclawlabs.ai` GitHub Pages 首页
-- 独立 Skill Hub 体验
-- 更完整的 builder 生态工作流
-- 更多公开语种覆盖
-
-### 联系方式
-
-- 公共邮箱：`info@cyberclawlabs.ai`
-
-不要只根据本 README 判断实现状态。当前事实应结合代码、测试结果、实现报告和评审记录共同判断。
+Apache-2.0

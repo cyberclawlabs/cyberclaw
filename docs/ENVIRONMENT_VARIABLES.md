@@ -110,6 +110,20 @@ export LLM_API_KEY="sk-dev-..."
 cargo run --bin cyberclaw-server
 ```
 
+## v1.2.17 新增
+
+### CYBERCLAW_SANDBOX_DEFAULT_PROFILE
+- **必需性**: 可选
+- **默认值**: `dev`（development 环境），`isolated`（production 环境）
+- **描述**: 容器隔离能力的默认 sandbox profile，可选值: `minimal` / `dev` / `isolated`
+- **示例**: `export CYBERCLAW_SANDBOX_DEFAULT_PROFILE=isolated`
+
+### CYBERCLAW_LOOP_BUDGET_PROFILE
+- **必需性**: 可选
+- **默认值**: `L2`
+- **描述**: Agentic loop 预算 profile（wall-clock + token + 重复检测窗口），可选值: `L1`（短交互）/ `L2`（标准）/ `L3`（长 autopilot）
+- **示例**: `export CYBERCLAW_LOOP_BUDGET_PROFILE=L3`
+
 ## 安全最佳实践
 
 1. **生产环境必须设置**:
