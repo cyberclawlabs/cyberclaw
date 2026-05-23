@@ -39,6 +39,7 @@ pub mod error;
 pub mod memory;
 pub mod memory_store;
 pub mod migration;
+pub mod scoped_memory;
 pub mod semantic_memory;
 pub mod skill_archive_repository;
 pub mod state_store;
@@ -55,6 +56,7 @@ pub use memory_store::{
 #[cfg(feature = "sqlite")]
 pub use memory_store::sqlite_leveled::SqliteLeveledStore;
 pub use migration::{create_store, MigrationRunner, MigrationVersion, StoreBackend};
+pub use scoped_memory::{CompressedTurn, MessageBlock, ScopedMemory, Turn, TurnRole};
 pub use semantic_memory::{
     InMemorySemanticMemoryStore, MemoryKind, MemoryProvenance, MemoryScope, ProceduralRule,
     SemanticMemoryEntry, SemanticMemoryStore,

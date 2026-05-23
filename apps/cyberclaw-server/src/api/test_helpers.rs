@@ -60,7 +60,7 @@ pub fn build_test_state() -> Arc<AppState> {
         ControlPlaneOrchestrator::new(
             gateway,
             resolver,
-            registry,
+            registry.clone(),
             review_queue.clone(),
             task_manager.clone(),
             execution_service.clone(),
@@ -79,6 +79,7 @@ pub fn build_test_state() -> Arc<AppState> {
         task_manager,
         execution_service,
         review_queue,
+        package_registry: registry,
     };
     let mut state = AppState::new(
         llm_client,

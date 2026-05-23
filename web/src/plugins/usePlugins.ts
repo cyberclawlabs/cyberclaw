@@ -10,7 +10,7 @@
 // platform plugins are local-filesystem only and rarely change at runtime.
 
 import { useEffect, useState, useCallback } from "react";
-import { type Plugin, fetchPlugins } from "@/lib/api";
+import { type Plugin, fetchPlugins, isAuthenticated } from "@/lib/api";
 
 /// A plugin entry that the shell is willing to dynamically mount as a nav
 /// item + route. Plugins missing tab_path or marked hidden / disabled are
@@ -38,6 +38,13 @@ export function usePlugins(): UsePluginsResult {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    // Skip fetch when unauthenticated (e.g. login page mounts AppV2 before
+    // RequireAuth resolves) — avoids a noisy 401 in the console.
+    if (!isAuthenticated()) {
+      setPlugins([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {

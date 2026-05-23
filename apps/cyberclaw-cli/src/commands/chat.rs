@@ -858,27 +858,22 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         }
     };
 
-    // S17 CLI --model default — 优先 --model flag，否则**直接读本地** ~/.cyberclaw/models.json
-    // （CLI 自治：catalog 是本地状态，不依赖 server 在线即可工作）。
-    let current_model = args.model.unwrap_or_else(|| {
-        let path = std::env::var("HOME")
-            .ok()
-            .map(|h| std::path::PathBuf::from(h).join(".cyberclaw").join("models.json"));
-        if let Some(p) = path {
-            if let Ok(body) = std::fs::read_to_string(&p) {
-                #[derive(serde::Deserialize)]
-                struct CatalogResp {
-                    current_default: String,
-                }
-                if let Ok(c) = serde_json::from_str::<CatalogResp>(&body) {
-                    return c.current_default;
-                }
-            }
-        }
-        let fallback = "deepseek-chat".to_string();
-        tracing::warn!(model = %fallback, "no --model + models.json missing; using fallback");
-        fallback
-    });
+    // Model resolution priority (2026-05-19 real-business test discovery):
+    //   1. --model CLI flag (operator explicit choice)
+    //   2. GET /api/v2/status → default_model (live server truth, survives env rotation)
+    //   3. ~/.cyberclaw/models.json `current_default` (local cache, may be stale)
+    //   4. Hardcoded "gpt-4" as last-resort
+    //
+    // Before this change the order was [flag → local cache → hardcoded].
+    // After admin rotates ~/.cyberclaw/llm.env (e.g. DeepSeek → MiniMax)
+    // the local cache stays stale → chat-tui shipped "deepseek-chat" to a
+    // MiniMax-backed server, which forwarded it verbatim and got
+    // `unknown model 'deepseek-chat' (2013)` 400. Querying the live
+    // server fixes the root cause.
+    let current_model = match args.model {
+        Some(m) => m,
+        None => resolve_default_model(&client, &server).await,
+    };
     let agent_id = args.agent;
 
     // 保存本次 conv_id
@@ -886,6 +881,68 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     // 进入 ratatui TUI
     chat_tui::run_tui(client, server, token, conv_id, agent_id, current_model).await
+}
+
+/// Resolve the default LLM model name when --model is not provided.
+///
+/// Tries live server (`/api/v2/status` default_model) first because that
+/// is the authoritative source of "what the backend can serve right now".
+/// Falls back to the local catalog cache (~/.cyberclaw/models.json
+/// `current_default`) if server is unreachable. Falls back to "gpt-4"
+/// only when neither is available.
+async fn resolve_default_model(client: &Client, server: &str) -> String {
+    // 1. Try server.
+    #[derive(serde::Deserialize)]
+    struct StatusResp {
+        default_model: String,
+    }
+    let token = load_token().unwrap_or_default();
+    let mut req = client
+        .get(format!("{}/api/v2/status", server))
+        .timeout(std::time::Duration::from_secs(3));
+    if !token.is_empty() {
+        req = req.bearer_auth(&token);
+    }
+    if let Ok(resp) = req.send().await {
+        if resp.status().is_success() {
+            if let Ok(s) = resp.json::<StatusResp>().await {
+                if !s.default_model.is_empty() {
+                    return s.default_model;
+                }
+            }
+        }
+    }
+
+    // 2. Fall back to local catalog cache.
+    let path = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".cyberclaw").join("models.json"));
+    if let Some(p) = path {
+        if let Ok(body) = std::fs::read_to_string(&p) {
+            #[derive(serde::Deserialize)]
+            struct CatalogResp {
+                current_default: String,
+            }
+            if let Ok(c) = serde_json::from_str::<CatalogResp>(&body) {
+                if !c.current_default.is_empty() {
+                    tracing::info!(
+                        model = %c.current_default,
+                        "server status unreachable; using ~/.cyberclaw/models.json cache"
+                    );
+                    return c.current_default;
+                }
+            }
+        }
+    }
+
+    // 3. Last-resort. We log at warn so operators see the failure mode
+    // (better than silently shipping "gpt-4" against a non-OpenAI backend).
+    let fallback = "gpt-4".to_string();
+    tracing::warn!(
+        model = %fallback,
+        "no --model + server /api/v2/status unreachable + models.json missing; using hardcoded fallback"
+    );
+    fallback
 }
 
 /// 旧的 rustyline REPL（保留供 fallback / 测试）

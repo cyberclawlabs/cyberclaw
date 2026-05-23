@@ -215,6 +215,12 @@ pub enum GrepOutputMode {
     Count,
 }
 
+/// Default value for `SearchGrepInput::case_insensitive` — case-insensitive
+/// is the more useful interactive default (see field doc for rationale).
+fn default_case_insensitive() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchGrepInput {
     /// Regex or literal pattern to search for.
@@ -229,8 +235,13 @@ pub struct SearchGrepInput {
     /// Maps to `rg --type`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_type: Option<String>,
-    /// Case-insensitive search (`rg -i`).
-    #[serde(default)]
+    /// Case-insensitive search (`rg -i`). Default `true` — matches grep -i
+    /// convention common in interactive search; aligns with how humans
+    /// usually phrase queries ("find all error logs" expects 4 matches
+    /// across error/Error/ERROR, not 1).
+    /// Pass `false` explicitly when case-sensitivity matters (e.g. matching
+    /// a class name, constant, or env-var key).
+    #[serde(default = "default_case_insensitive")]
     pub case_insensitive: bool,
     /// Lines of context before each match (`rg -B`).
     #[serde(skip_serializing_if = "Option::is_none")]

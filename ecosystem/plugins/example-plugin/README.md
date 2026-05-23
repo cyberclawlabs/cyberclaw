@@ -191,6 +191,6 @@ Apache 2.0 License
 
 ## 支持
 
-- 文档：https://github.com/cyberclawlabs/cyberclaw/tree/main/docs/plugins
+- 文档：https://docs.cyberclaw.io/plugins
 - 论坛：https://forum.cyberclaw.io
-- Issues：https://github.com/cyberclawlabs/example-plugin/issues
+- Issues：https://github.com/cyberclaw/example-plugin/issues

@@ -7,6 +7,7 @@
 //! to connectors), preserving the governance and audit chain.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +20,9 @@ use cyberclaw_core::gateway::OrchestratorGateway;
 use cyberclaw_core::ids::SkillId;
 use cyberclaw_llm::client::LlmClient;
 use cyberclaw_llm::types::{ChatRequest, Message, Role, ToolCall, ToolDefinition};
+
+use crate::loop_governor::{AgenticLoopGovernor, LoopCtx, LoopDecision, LoopProfile};
+use crate::verify::{VerificationDirective, VerifierChain, VerifyCtx};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -309,6 +313,38 @@ pub struct DefaultAgenticLoop {
     /// dispatch path reads it via [`AgenticLoop::active_skill_bindings`]
     /// on every tool-call to feed the SkillCompat translator.
     active_skill_bindings: Vec<SkillId>,
+    /// US-103b — optional governor that enforces the 4 gates
+    /// (wall-clock / token-budget / repetition / compress) on every
+    /// iteration. When `None`, the loop preserves its legacy behaviour
+    /// (only `IterationBudget` + `StuckDetector` apply).
+    governor: Option<AgenticLoopGovernor>,
+    /// US-103b — optional output verifier chain. When set, the loop
+    /// runs the chain on the assistant's final text before declaring
+    /// `Done`; non-Accept directives turn the Done into a feedback
+    /// loop (the directive's feedback becomes a new user-role
+    /// message and the iteration continues).
+    verifier_chain: Option<Arc<VerifierChain>>,
+    /// US-103b — verifier context used by the chain. Static for a
+    /// session; updated via [`Self::with_verify_ctx`].
+    verify_ctx: VerifyCtx,
+    /// US-103b — last user prompt captured at `add_user_message` time
+    /// so the verifier chain can be invoked with the user's intent
+    /// even after multiple iterations have appended tool / assistant
+    /// turns. Empty until the first user message is added.
+    last_user_prompt: String,
+    /// US-103b — whether the most recent verifier-directive triggered a
+    /// retry. Caps the retries at 1 per session so a hostile verifier
+    /// can't burn the full iteration budget.
+    verifier_retry_used: bool,
+    /// GAP-4 (2026-05-23) — whether we already nudged the model after an
+    /// empty-content completion. Some LLMs (observed: MiniMax) consume
+    /// 10k+ thinking tokens then return finish_reason=stop with
+    /// content="" or content="   \n". Once per session we inject a
+    /// system hint reminding the model to actually emit the answer
+    /// inline, then let the loop iterate again. Caps at 1 to avoid
+    /// pathological loops (stuck_detector covers repeated identical
+    /// behavior beyond that).
+    empty_completion_nudged: bool,
 }
 
 impl DefaultAgenticLoop {
@@ -323,6 +359,139 @@ impl DefaultAgenticLoop {
             initialized: false,
             memory: None,
             active_skill_bindings: Vec::new(),
+            governor: None,
+            verifier_chain: None,
+            verify_ctx: VerifyCtx::default(),
+            last_user_prompt: String::new(),
+            verifier_retry_used: false,
+            empty_completion_nudged: false,
+        }
+    }
+
+    /// US-103b — install an [`AgenticLoopGovernor`] on this loop.
+    ///
+    /// When set, every `next_iteration()` consults the governor before
+    /// the LLM call. Returns `Self` so it chains naturally with
+    /// `with_memory(...)`.
+    pub fn with_governor(mut self, governor: AgenticLoopGovernor) -> Self {
+        self.governor = Some(governor);
+        self
+    }
+
+    /// US-103b — convenience: install a governor built from a
+    /// [`LoopProfile`] preset. `L1` for short prompts, `L2` for
+    /// medium, `L3` for complex multi-turn.
+    pub fn with_loop_profile(self, profile: LoopProfile) -> Self {
+        self.with_governor(AgenticLoopGovernor::from_profile(profile))
+    }
+
+    /// US-103b — install a [`VerifierChain`] on this loop. The chain
+    /// runs once per `Done` iteration. Wrapped in `Arc` so callers can
+    /// share a single chain across multiple loop instances without
+    /// rebuilding it.
+    pub fn with_verifier_chain(mut self, chain: Arc<VerifierChain>) -> Self {
+        self.verifier_chain = Some(chain);
+        self
+    }
+
+    /// US-103b — replace the verifier context. Useful when the prompt
+    /// metadata declares explicit expectations (e.g. `expected_json_keys`).
+    pub fn with_verify_ctx(mut self, ctx: VerifyCtx) -> Self {
+        self.verify_ctx = ctx;
+        self
+    }
+
+    /// US-103b — get a mutable reference to the verifier context so
+    /// callers can populate it after-the-fact (e.g. from prompt
+    /// metadata extracted during request parsing).
+    pub fn verify_ctx_mut(&mut self) -> &mut VerifyCtx {
+        &mut self.verify_ctx
+    }
+
+    /// US-103b — auto-bind a domain expert skill body into the loop's
+    /// system prompt. This is the in-loop equivalent of the
+    /// `auto_bind_extra_skills` helper used by the server's
+    /// `chat_handler`; tests and alternative callers can use it
+    /// without taking a hard dep on the chat-handler crate.
+    ///
+    /// `skill_name` and `body` are typically `(rule.skill_name,
+    /// fs::read_to_string(rule.skill_dir.join("SKILL.md")))` produced
+    /// by `cyberclaw_skill_runtime::SkillBinder::match_prompt`. The
+    /// caller stays responsible for matching against the user prompt;
+    /// the loop only knows how to append the body once the caller has
+    /// decided it's relevant. This keeps the agent runtime free of a
+    /// hard dep on `cyberclaw-skill-runtime`.
+    ///
+    /// Works in two modes:
+    ///
+    /// - **Pre-init** (no `init()` called yet): the section is appended
+    ///   to `self.config.system_prompt` so the next `init()` injects it
+    ///   into the message list.
+    /// - **Post-init**: appended to the existing system message in
+    ///   `self.state.messages` (or pushed as a fresh system message if
+    ///   none exists). Callers that auto-bind based on the *first* user
+    ///   prompt can therefore call this after `init()` + `add_user_message()`.
+    ///
+    /// Multiple skills can be appended; each is prefixed with a
+    /// `## Auto-bound skill: {name}` heading for parity with the
+    /// chat-handler injection format.
+    pub fn append_skill_to_system_prompt(
+        &mut self,
+        skill_name: &str,
+        body: &str,
+    ) -> &mut Self {
+        let section = format!("\n\n## Auto-bound skill: {skill_name}\n\n{body}");
+        // Always update the config so a later re-init still has the bound text.
+        self.config.system_prompt.push_str(&section);
+        // If init() has already run, also fold the section into the
+        // active state's system message so the very next LLM call sees it.
+        if self.initialized {
+            if let Some(sys_msg) = self
+                .state
+                .messages
+                .iter_mut()
+                .find(|m| m.role == Role::System)
+            {
+                sys_msg.content.push_str(&section);
+            } else {
+                self.state.messages.insert(0, Message::system(&section));
+            }
+        }
+        self
+    }
+
+    /// US-103b — load a SKILL.md from `<skill_dir>/SKILL.md` and append
+    /// it to the base system prompt under the canonical
+    /// `## Auto-bound skill: {name}` heading. On read failure the loop
+    /// logs a warning at `warn` and proceeds (auto-bind is best-effort
+    /// — a missing SKILL.md must never break the request path).
+    ///
+    /// Returns `true` on success, `false` if the file could not be read.
+    pub fn append_skill_from_dir(
+        &mut self,
+        skill_name: &str,
+        skill_dir: impl Into<PathBuf>,
+    ) -> bool {
+        let path = skill_dir.into().join("SKILL.md");
+        match std::fs::read_to_string(&path) {
+            Ok(body) => {
+                self.append_skill_to_system_prompt(skill_name, &body);
+                tracing::debug!(
+                    skill = skill_name,
+                    path = %path.display(),
+                    "agentic_loop: SKILL.md auto-bound"
+                );
+                true
+            }
+            Err(err) => {
+                tracing::warn!(
+                    skill = skill_name,
+                    path = %path.display(),
+                    ?err,
+                    "agentic_loop: SKILL.md unreadable, skipping auto-bind"
+                );
+                false
+            }
         }
     }
 
@@ -377,7 +546,12 @@ impl DefaultAgenticLoop {
 
     /// Append a user message to the conversation.
     pub fn add_user_message(&mut self, content: impl Into<String>) {
-        self.state.messages.push(Message::user(content));
+        let content_str = content.into();
+        // US-103b — remember the most recent user prompt so the verifier
+        // chain can be invoked with the user's original intent even after
+        // tool / assistant turns intervene.
+        self.last_user_prompt = content_str.clone();
+        self.state.messages.push(Message::user(content_str));
     }
 
     /// Append a tool result message to the conversation.
@@ -484,6 +658,42 @@ impl AgenticLoop for DefaultAgenticLoop {
             return Ok(IterationResult::BudgetExhausted(reason));
         }
 
+        // US-103b — governor gate (wall-clock / token-budget / repetition
+        // / compress). Runs BEFORE the iteration counter increments so a
+        // HardStop on iteration N does not consume budget N.
+        if let Some(ref mut governor) = self.governor {
+            let ctx = LoopCtx {
+                state: &self.state,
+                budget: &self.config.budget,
+            };
+            match governor.pre_iteration(&ctx) {
+                LoopDecision::HardStop(reason) => {
+                    tracing::warn!(
+                        reason = %reason,
+                        elapsed_ms = governor.elapsed().as_millis() as u64,
+                        "agentic_loop: governor HardStop"
+                    );
+                    return Ok(IterationResult::BudgetExhausted(reason.to_string()));
+                }
+                LoopDecision::CompressAndContinue => {
+                    tracing::info!(
+                        msgs_before = self.state.messages.len(),
+                        "agentic_loop: governor CompressAndContinue"
+                    );
+                    let compressed =
+                        governor.compressor_mut().compress_all(&self.state.messages);
+                    tracing::info!(
+                        msgs_after = compressed.messages.len(),
+                        tokens_saved = compressed.tokens_saved_estimate,
+                        stages = ?compressed.stages_applied,
+                        "agentic_loop: compression applied"
+                    );
+                    self.state.messages = compressed.messages;
+                }
+                LoopDecision::Continue => {}
+            }
+        }
+
         self.state.iteration_count += 1;
 
         // Call the LLM.
@@ -497,6 +707,13 @@ impl AgenticLoop for DefaultAgenticLoop {
         // Track token usage.
         if let Some(usage) = &response.usage {
             self.state.tokens_consumed += usage.total_tokens as u64;
+
+            // US-103b — feed the governor so its token gate sees the
+            // real spend. Even if the governor wasn't installed at
+            // construction time this is a no-op (Option::as_mut is None).
+            if let Some(ref mut governor) = self.governor {
+                governor.record_tokens(usage.total_tokens as u64);
+            }
 
             // P1.1 — emit cache hit/miss telemetry so operators can verify
             // prompt cache 工作。Anthropic 返回 cache_read /
@@ -559,7 +776,24 @@ impl AgenticLoop for DefaultAgenticLoop {
                     memory.write_iteration_summary(&self.state)?;
                 }
 
-                return Ok(IterationResult::ToolCalls(tool_calls.clone()));
+                // US-103b — feed the governor's repetition detector with
+                // the ToolCalls signature so a repeating "call X, ignore"
+                // pattern trips gate 3 even when the underlying
+                // StuckDetector hasn't yet — they use independent
+                // thresholds.
+                let tc_clone = tool_calls.clone();
+                if let Some(ref mut governor) = self.governor {
+                    let ctx = LoopCtx {
+                        state: &self.state,
+                        budget: &self.config.budget,
+                    };
+                    governor.record_iteration_result(
+                        &ctx,
+                        &IterationResult::ToolCalls(tc_clone.clone()),
+                    );
+                }
+
+                return Ok(IterationResult::ToolCalls(tc_clone));
             }
         }
 
@@ -567,22 +801,115 @@ impl AgenticLoop for DefaultAgenticLoop {
         let content = message.content.clone();
         self.state.messages.push(message);
 
-        let result = match choice.finish_reason.as_deref() {
+        // GAP-4 — treat whitespace-only content as empty. Some LLMs return
+        // " \n" or just "\n" after consuming thousands of thinking tokens,
+        // and `String::is_empty()` would let that through as a valid Done.
+        let content_effectively_empty = content.trim().is_empty();
+
+        // GAP-4 (2026-05-23) — when the model returns finish_reason=stop with
+        // empty (or whitespace-only) content for the first time in a session,
+        // inject a system nudge before the next iteration. Observed on
+        // MiniMax-M2.7 with Rust/SQL code-generation prompts: 11k thinking
+        // tokens consumed, 0 content emitted, model exits cleanly. The nudge
+        // explicitly tells the model to STOP thinking and output the answer
+        // inline as a code block / text reply. Capped at 1 nudge per session
+        // (StuckDetector covers identical-repeat failures beyond that).
+        if content_effectively_empty
+            && choice.finish_reason.as_deref() == Some("stop")
+            && !self.empty_completion_nudged
+        {
+            tracing::warn!(
+                "agentic_loop: empty content with finish_reason=stop — injecting GAP-4 retry hint"
+            );
+            self.state.messages.push(Message::system(
+                "ENFORCEMENT (GAP-4 retry): Your previous response returned \
+                 finish_reason=stop with empty content. You likely consumed \
+                 thinking tokens without emitting the actual answer. Please \
+                 output your answer NOW as plain text or a code block — do \
+                 not loop into thinking again. If the task requires code, \
+                 emit it directly inline; if it requires a count or fact, \
+                 state it directly. The user is waiting for output, not \
+                 silent reasoning.",
+            ));
+            self.empty_completion_nudged = true;
+        }
+
+        let mut result = match choice.finish_reason.as_deref() {
             Some("stop") => {
-                if content.is_empty() {
+                if content_effectively_empty {
                     IterationResult::Continue
                 } else {
                     IterationResult::Done(content)
                 }
             }
             _ => {
-                if content.is_empty() {
+                if content_effectively_empty {
                     IterationResult::Continue
                 } else {
                     IterationResult::TextResponse(content)
                 }
             }
         };
+
+        // US-103b — VerifierChain hook: if the iteration finished with a
+        // `Done`, give the verifier chain a chance to gate the answer.
+        // Non-Accept directives:
+        //  - `ContinueWithFeedback(msg)` → inject the feedback as a new
+        //    user-role message, downgrade the result to `Continue` so
+        //    the outer loop runs another iteration.
+        //  - `RejectAndRetry(msg)` → same plumbing, but only once per
+        //    session (the `verifier_retry_used` latch). After the first
+        //    rejection, subsequent Done is accepted as-is to avoid an
+        //    adversarial chain burning the iteration budget.
+        if let IterationResult::Done(ref text) = result {
+            if let Some(chain) = self.verifier_chain.clone() {
+                let directive = chain
+                    .run(&self.last_user_prompt, text, &self.verify_ctx)
+                    .await;
+                tracing::debug!(
+                    directive = ?directive,
+                    retry_used = self.verifier_retry_used,
+                    "agentic_loop: verifier_chain directive"
+                );
+                match directive {
+                    VerificationDirective::Accept => {
+                        // Pass through.
+                    }
+                    VerificationDirective::ContinueWithFeedback(fb) => {
+                        self.state.messages.push(Message::user(format!(
+                            "[verifier feedback]\n{fb}"
+                        )));
+                        result = IterationResult::Continue;
+                    }
+                    VerificationDirective::RejectAndRetry(fb) => {
+                        if self.verifier_retry_used {
+                            tracing::warn!(
+                                feedback = %fb,
+                                "agentic_loop: verifier rejected but retry quota exhausted; accepting Done"
+                            );
+                            // Keep result as Done(text) — accept after one retry.
+                        } else {
+                            self.state.messages.push(Message::user(format!(
+                                "[verifier rejected — retry]\n{fb}"
+                            )));
+                            self.verifier_retry_used = true;
+                            result = IterationResult::Continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // US-103b — feed the governor's repetition detector with whatever
+        // the iteration produced (text / tool calls — already handled in
+        // the tool-calls early-return branch).
+        if let Some(ref mut governor) = self.governor {
+            let ctx = LoopCtx {
+                state: &self.state,
+                budget: &self.config.budget,
+            };
+            governor.record_iteration_result(&ctx, &result);
+        }
 
         // Write iteration summary to memory at the end of a non-tool-call iteration.
         if let Some(ref mut memory) = self.memory {
@@ -796,6 +1123,99 @@ mod tests {
         assert_eq!(summary.iterations, 2);
         assert_eq!(summary.tokens_used, 30); // 15 per call * 2
         assert!(summary.final_output.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_gap4_empty_stop_continues_then_done() {
+        // GAP-4 regression: model returns finish_reason=stop with empty
+        // (or whitespace-only) content on iteration 1. Loop must NOT
+        // treat that as Done — must inject system nudge and continue.
+        // Iteration 2 returns real content -> Done.
+        let llm = Arc::new(MockLlm::new(vec![
+            // Iter 1: 11k thinking tokens consumed, content is just "\n  ".
+            MockLlm::make_text_response("\n  ", "stop"),
+            // Iter 2: model produces the actual answer.
+            MockLlm::make_text_response("fn parse_kv() -> Vec<(String, String)> { vec![] }", "stop"),
+        ]));
+        let gw = Arc::new(MockGateway);
+        let mut loop_ = DefaultAgenticLoop::new(llm, gw);
+
+        loop_
+            .init(LoopConfig {
+                system_prompt: "You are an agent.".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        loop_.add_user_message("Write a Rust function parse_kv.");
+
+        // Iteration 1: whitespace content + stop -> must NOT be Done.
+        let result = loop_.next_iteration().await.unwrap();
+        assert!(
+            matches!(result, IterationResult::Continue),
+            "GAP-4: whitespace content + stop must yield Continue, not Done, got {result:?}"
+        );
+        // Verify the nudge was injected (system message appended).
+        assert!(
+            loop_
+                .state
+                .messages
+                .iter()
+                .any(|m| m.content.contains("ENFORCEMENT (GAP-4 retry)")),
+            "GAP-4: nudge system message must be injected on first empty stop"
+        );
+
+        // Iteration 2: real content + stop -> Done.
+        let result = loop_.next_iteration().await.unwrap();
+        match result {
+            IterationResult::Done(text) => {
+                assert!(text.contains("parse_kv"), "iter 2 must carry real content");
+            }
+            other => panic!("iter 2 expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gap4_nudge_capped_at_one_per_session() {
+        // Two consecutive empty-stop iterations: first must nudge, second
+        // must still Continue (no second nudge — stuck_detector takes
+        // over for adversarial loops).
+        let llm = Arc::new(MockLlm::new(vec![
+            MockLlm::make_text_response("", "stop"),
+            MockLlm::make_text_response("   ", "stop"),
+        ]));
+        let gw = Arc::new(MockGateway);
+        let mut loop_ = DefaultAgenticLoop::new(llm, gw);
+
+        loop_
+            .init(LoopConfig::default())
+            .await
+            .unwrap();
+        loop_.add_user_message("test");
+
+        let r1 = loop_.next_iteration().await.unwrap();
+        assert!(matches!(r1, IterationResult::Continue));
+        let nudges_after_iter1 = loop_
+            .state
+            .messages
+            .iter()
+            .filter(|m| m.content.contains("ENFORCEMENT (GAP-4 retry)"))
+            .count();
+        assert_eq!(nudges_after_iter1, 1, "first empty stop must nudge once");
+
+        let r2 = loop_.next_iteration().await.unwrap();
+        assert!(matches!(r2, IterationResult::Continue));
+        let nudges_after_iter2 = loop_
+            .state
+            .messages
+            .iter()
+            .filter(|m| m.content.contains("ENFORCEMENT (GAP-4 retry)"))
+            .count();
+        assert_eq!(
+            nudges_after_iter2, 1,
+            "second empty stop must NOT add a second nudge (cap=1)"
+        );
     }
 
     #[tokio::test]
@@ -1270,5 +1690,203 @@ mod tests {
         }
         let l = EmptyLoop;
         assert!(l.active_skill_bindings().is_empty());
+    }
+
+    // ---------------------------------------------------------------------
+    // US-103b stitching tests — verify the 3 components (skill auto-bind,
+    // governor, verifier_chain) wire together inside DefaultAgenticLoop.
+    // ---------------------------------------------------------------------
+
+    /// US-103b — auto-bound SKILL.md body appears in the initial system
+    /// prompt so the LLM sees domain expert vocabulary on the first call.
+    #[tokio::test]
+    async fn us103b_skill_auto_bind_appears_in_system_prompt() {
+        use std::fs;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("domain-expert-web3");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: domain-expert-web3\n---\n# Domain Expert — Web3\nVocabulary: multisig, Safe, Tenderly, Forta.\n",
+        )
+        .unwrap();
+
+        let llm = Arc::new(MockLlm::new(vec![MockLlm::make_text_response(
+            "ok",
+            "stop",
+        )]));
+        let gw = Arc::new(MockGateway);
+        let mut loop_ = DefaultAgenticLoop::new(llm, gw);
+
+        loop_
+            .init(LoopConfig {
+                system_prompt: "base sys".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // Caller (chat_handler or a test) auto-binds the web3 skill once
+        // it has seen the user's first message. Post-init append folds
+        // the body into the existing system message.
+        let bound = loop_.append_skill_from_dir("domain-expert-web3", &skill_dir);
+        assert!(bound, "SKILL.md should be readable");
+
+        // The init message list should now contain a system message that
+        // includes both the base prompt and the auto-bound skill section.
+        let sys_msg = loop_
+            .state
+            .messages
+            .iter()
+            .find(|m| m.role == Role::System)
+            .expect("system message exists");
+        assert!(sys_msg.content.contains("base sys"));
+        assert!(sys_msg.content.contains("Auto-bound skill: domain-expert-web3"));
+        assert!(sys_msg.content.contains("multisig"));
+        assert!(sys_msg.content.contains("Tenderly"));
+    }
+
+    /// US-103b — governor's token gate trips and turns the next iteration
+    /// into a `BudgetExhausted` with the governor's reason.
+    #[tokio::test]
+    async fn us103b_governor_hard_stop_surfaces_as_budget_exhausted() {
+        use crate::loop_governor::{AgenticLoopGovernor, GovernorConfig};
+        use std::time::Duration;
+
+        let llm = Arc::new(MockLlm::new(vec![
+            MockLlm::make_text_response("first", "stop"),
+            MockLlm::make_text_response("never seen", "stop"),
+        ]));
+        let gw = Arc::new(MockGateway);
+
+        // Token budget so tight the governor trips on iteration 2.
+        let governor = AgenticLoopGovernor::new(GovernorConfig {
+            wall_clock_budget: Duration::from_secs(60),
+            max_total_tokens: 10, // first call records 15 tokens -> trips next time
+            compress_threshold_chars: 0,
+            repetition_window: 0,
+            ..Default::default()
+        });
+
+        let mut loop_ = DefaultAgenticLoop::new(llm, gw).with_governor(governor);
+
+        loop_.init(LoopConfig::default()).await.unwrap();
+        loop_.add_user_message("hello");
+
+        // First iteration succeeds and records tokens.
+        let r1 = loop_.next_iteration().await.unwrap();
+        assert!(matches!(r1, IterationResult::Done(_)));
+
+        // Second iteration: governor's token gate has tripped (15 >= 10).
+        let r2 = loop_.next_iteration().await.unwrap();
+        match r2 {
+            IterationResult::BudgetExhausted(reason) => {
+                assert!(
+                    reason.contains("token"),
+                    "expected token-budget reason, got {reason}"
+                );
+            }
+            other => panic!("expected BudgetExhausted from governor, got {other:?}"),
+        }
+    }
+
+    /// US-103b — full 3-way stitch: skill auto-bind (web3 vocabulary in
+    /// system prompt) + governor (records tokens) + verifier_chain
+    /// (`RegexAssertVerifier` rejects first Done, accepts second).
+    #[tokio::test]
+    async fn us103b_skill_governor_verifier_stitched_end_to_end() {
+        use crate::loop_governor::{AgenticLoopGovernor, LoopProfile};
+        use crate::verify::{RegexAssertVerifier, VerifierChain, VerifyCtx};
+        use std::fs;
+
+        // 1) Prepare a fake web3 SKILL.md and bind it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("domain-expert-web3");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "# Web3 expert\nDefault vocabulary: multisig Safe Tenderly threshold.\n",
+        )
+        .unwrap();
+
+        // 2) Mock LLM: iteration 1 emits a reply WITHOUT the required
+        //    "multisig" token — verifier RejectAndRetry. Iteration 2 emits
+        //    a compliant reply — verifier Accept.
+        let llm = Arc::new(MockLlm::new(vec![
+            MockLlm::make_text_response("here is your answer (no domain words)", "stop"),
+            MockLlm::make_text_response("Use the Safe multisig with threshold 3/5", "stop"),
+        ]));
+        let gw = Arc::new(MockGateway);
+
+        // 3) Build the verifier chain: response MUST contain "multisig".
+        let chain = Arc::new(
+            VerifierChain::new()
+                .add(Box::new(
+                    RegexAssertVerifier::new().with_patterns(["multisig".to_string()]),
+                )),
+        );
+
+        // 4) Build governor with generous budgets so it does NOT trip — we
+        //    only want to confirm it observes the iterations.
+        let governor = AgenticLoopGovernor::from_profile(LoopProfile::L3);
+
+        let mut loop_ = DefaultAgenticLoop::new(llm, gw)
+            .with_governor(governor)
+            .with_verifier_chain(chain)
+            .with_verify_ctx(VerifyCtx::new());
+
+        loop_
+            .init(LoopConfig {
+                system_prompt: "You are a senior on-chain operator.".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        loop_.add_user_message("Outline a Safe multisig USDC→ETH runbook");
+
+        // After init + first user msg, simulate the chat_handler's
+        // auto-bind step: skill keyword matched, body loaded from
+        // disk, folded into the active system message.
+        loop_.append_skill_from_dir("domain-expert-web3", &skill_dir);
+
+        // Iteration 1: verifier rejects the first Done; loop returns Continue.
+        let r1 = loop_.next_iteration().await.unwrap();
+        assert!(
+            matches!(r1, IterationResult::Continue),
+            "iteration 1 should be downgraded to Continue by verifier rejection, got {r1:?}"
+        );
+
+        // Iteration 2: compliant Done passes the verifier.
+        let r2 = loop_.next_iteration().await.unwrap();
+        match r2 {
+            IterationResult::Done(text) => {
+                assert!(text.contains("multisig"));
+            }
+            other => panic!("expected Done on iteration 2, got {other:?}"),
+        }
+
+        // Skill auto-bind landed in the system prompt.
+        let sys_msg = loop_
+            .state
+            .messages
+            .iter()
+            .find(|m| m.role == Role::System)
+            .expect("system message");
+        assert!(sys_msg.content.contains("Web3 expert"));
+        assert!(sys_msg.content.contains("Auto-bound skill: domain-expert-web3"));
+
+        // Governor observed real token spend (>0 across 2 iterations).
+        let gov = loop_.governor.as_ref().expect("governor installed");
+        assert!(
+            gov.cost_tracker().tokens_consumed_total > 0,
+            "governor should have recorded LLM token usage"
+        );
+
+        // Verifier retry latch is set (single retry consumed).
+        assert!(
+            loop_.verifier_retry_used,
+            "verifier retry should have fired exactly once"
+        );
     }
 }

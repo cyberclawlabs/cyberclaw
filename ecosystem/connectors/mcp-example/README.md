@@ -266,6 +266,6 @@ Apache 2.0 License
 
 ## 支持
 
-- 文档：https://github.com/cyberclawlabs/cyberclaw/tree/main/docs/mcp
+- 文档：https://docs.cyberclaw.io/mcp
 - 论坛：https://forum.cyberclaw.io
-- Issues：https://github.com/cyberclawlabs/mcp-example/issues
+- Issues：https://github.com/cyberclaw/mcp-example/issues

@@ -170,6 +170,11 @@ pub struct ControlPlaneComponents {
     pub task_manager: Arc<InMemoryTaskManager>,
     pub execution_service: Arc<InMemoryExecutionService>,
     pub review_queue: Arc<InMemoryReviewQueue>,
+    /// v1.x — shared package registry (Agent / Skill / Connector / PlatformPlugin
+    /// metadata). The same `Arc` is also handed to `InMemoryResolver` so
+    /// runtime resolution and the `/api/v2/packages` admin surface always
+    /// reflect identical state.
+    pub package_registry: Arc<cyberclaw_control_plane::registry::InMemoryRegistry>,
 }
 
 /// 应用全局状态
@@ -184,6 +189,19 @@ pub struct AppState {
     // ===== 核心平台层 =====
     /// Connector 注册表
     pub connector_registry: Arc<ConnectorRegistry>,
+
+    /// 包注册表 (Agent/Skill/Connector/PlatformPlugin)
+    ///
+    /// v1.x — server-owned single source of truth backing `/api/v2/packages`
+    /// and `/api/v2/status`. Same `Arc` is shared with `InMemoryResolver` so
+    /// runtime resolution and the admin surface stay coherent.
+    pub package_registry: Arc<cyberclaw_control_plane::registry::InMemoryRegistry>,
+
+    /// User-installed package persistence (`~/.cyberclaw/installed-packages.json`).
+    ///
+    /// Re-loaded into `package_registry` on every server boot so packages
+    /// added via `POST /api/v2/packages` survive a restart.
+    pub installed_packages: Arc<crate::installed_packages::InstalledPackageStore>,
 
     /// Capability 调度器
     pub capability_dispatcher: Arc<CapabilityDispatcher>,
@@ -1161,9 +1179,18 @@ impl AppState {
                 .expect("failed to register HandoffConnector");
         }
 
+        // Materialize installed-packages store at construction time so
+        // the boot path can drive load + restore before the router serves
+        // its first request. The same Arc is exposed on AppState for the
+        // `/api/v2/packages` install/uninstall handlers.
+        let installed_packages =
+            Arc::new(crate::installed_packages::InstalledPackageStore::load_default());
+
         Self {
             llm_client,
             connector_registry,
+            package_registry: cp_components.package_registry,
+            installed_packages,
             capability_dispatcher,
             policy_engine,
             control_plane: cp_components.control_plane,
@@ -1756,7 +1783,7 @@ mod tests {
             ControlPlaneOrchestrator::new(
                 gateway,
                 resolver,
-                registry,
+                registry.clone(),
                 review_queue.clone(),
                 task_manager.clone(),
                 execution_service.clone(),
@@ -1777,6 +1804,7 @@ mod tests {
             task_manager,
             execution_service,
             review_queue,
+            package_registry: registry,
         };
 
         // 创建应用状态

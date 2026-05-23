@@ -1,10 +1,14 @@
-apiVersion: cyberclaw.io/v1alpha1
+apiVersion: cyberclaw.io/v2
 kind: Connector
 id: local
-version: 0.1.0
-name: LocalConnector
-displayName: Local File System and Command Connector
-summary: Provides file system, search, and command execution capabilities for local workspace
+version: 0.2.0
+name: local
+displayName: Local Connector
+summary: |
+  Native LocalConnector: filesystem, shell, web fetch+search, vision/image-gen/TTS/STT,
+  security scan, slide rendering, workdir checkpoints, and verifier capabilities.
+  Mirrors Hermes v0.12 toolset surface; implementation in
+  crates/cyberclaw-connectors/src/local/.
 owner: cyberclaw
 license: Apache-2.0
 homepage: https://cyberclaw.io
@@ -13,6 +17,11 @@ tags:
   - filesystem
   - search
   - command
+  - web
+  - vision
+  - audio
+  - image-gen
+  - security
   - native
 compatibility:
   platform: cyberclaw
@@ -25,90 +34,260 @@ compatibility:
   arch:
     - x86_64
     - aarch64
-dependencies: {}
 artifacts:
-  entry: local
-  files: []
-configSchema: null
+  entry: manifest.yaml
 spec:
   subtype: filesystem
   runtime: native
-  auth: null
   capabilities:
+    # ---------- Filesystem ----------
     - id: fs.read
       title: Read File
-      description: Read contents of a file within workspace
+      description: Read contents of a file
       inputSchema: FsReadInput
       outputSchema: FsReadOutput
       risk: low
-      effects:
-        - read
-      placement:
-        local: {}
-      timeouts:
-        requestMs: 5000
+      effects: [read]
+      timeouts: { requestMs: 5000 }
 
     - id: fs.write
       title: Write File
-      description: Write contents to a file within workspace
+      description: Write contents to a file
       inputSchema: FsWriteInput
       outputSchema: FsWriteOutput
       risk: medium
-      effects:
-        - write
-      placement:
-        local: {}
-      timeouts:
-        requestMs: 5000
+      effects: [write]
+      timeouts: { requestMs: 5000 }
 
     - id: fs.edit
       title: Edit File
-      description: Replace text in a file within workspace
+      description: Replace text in a file
       inputSchema: FsEditInput
       outputSchema: FsEditOutput
       risk: medium
-      effects:
-        - write
-      placement:
-        local: {}
-      timeouts:
-        requestMs: 5000
+      effects: [write]
+      timeouts: { requestMs: 5000 }
 
+    - id: fs.multiedit
+      title: Multi-Edit File
+      description: Apply multiple text replacements in one atomic operation
+      inputSchema: FsMultiEditInput
+      outputSchema: FsMultiEditOutput
+      risk: medium
+      effects: [write]
+      timeouts: { requestMs: 5000 }
+
+    - id: fs.patch_apply
+      title: Apply Unified Diff Patch
+      description: Apply a unified-diff patch to a file (Hermes BT-05 parity)
+      inputSchema: FsPatchApplyInput
+      outputSchema: FsPatchApplyOutput
+      risk: medium
+      effects: [write]
+      timeouts: { requestMs: 5000 }
+
+    - id: fs.list_dir
+      title: List Directory
+      description: Enumerate immediate children of a directory
+      inputSchema: FsListDirInput
+      outputSchema: FsListDirOutput
+      risk: low
+      effects: [read]
+      timeouts: { requestMs: 5000 }
+
+    - id: fs.append
+      title: Append to File
+      description: Append text to the end of an existing file
+      inputSchema: FsAppendInput
+      outputSchema: FsAppendOutput
+      risk: medium
+      effects: [write]
+      timeouts: { requestMs: 5000 }
+
+    - id: fs.stat
+      title: Stat Path
+      description: Return metadata for a path - existence, type, size, mtime, permissions
+      inputSchema: FsStatInput
+      outputSchema: FsStatOutput
+      risk: low
+      effects: [read]
+      timeouts: { requestMs: 5000 }
+
+    - id: fs.delete
+      title: Delete Path
+      description: Delete a file. Pass recursive=true to remove a directory tree.
+      inputSchema: FsDeleteInput
+      outputSchema: FsDeleteOutput
+      risk: high
+      effects: [write]
+      timeouts: { requestMs: 5000 }
+
+    # ---------- Search ----------
     - id: search.grep
       title: Search with Grep
-      description: Search for pattern in files within workspace
+      description: Search for pattern in files
       inputSchema: SearchGrepInput
       outputSchema: SearchGrepOutput
       risk: low
-      effects:
-        - read
-      placement:
-        local: {}
-      timeouts:
-        requestMs: 10000
+      effects: [read]
+      timeouts: { requestMs: 10000 }
 
     - id: search.glob
       title: Search with Glob
-      description: Find files matching pattern within workspace
+      description: Find files matching pattern
       inputSchema: SearchGlobInput
       outputSchema: SearchGlobOutput
       risk: low
-      effects:
-        - read
-      placement:
-        local: {}
-      timeouts:
-        requestMs: 10000
+      effects: [read]
+      timeouts: { requestMs: 10000 }
 
+    # ---------- Workdir checkpoints ----------
+    - id: workdir.checkpoint
+      title: Workdir Checkpoint
+      description: Take a shadow-git snapshot of a workdir. Returns hash, timestamp, file count, total size.
+      inputSchema: WorkdirCheckpointInput
+      outputSchema: WorkdirCheckpointOutput
+      risk: high
+      effects: [write]
+      timeouts: { requestMs: 60000 }
+
+    - id: workdir.list
+      title: List Workdir Checkpoints
+      description: List checkpoints for a workdir in reverse-chronological order
+      inputSchema: WorkdirListInput
+      outputSchema: WorkdirListOutput
+      risk: low
+      effects: [read]
+      timeouts: { requestMs: 15000 }
+
+    # ---------- Command execution ----------
     - id: cmd.exec
       title: Execute Command
-      description: Execute a shell command within workspace
+      description: Execute a shell command
       inputSchema: CmdExecInput
       outputSchema: CmdExecOutput
       risk: high
-      effects:
-        - execute
-      placement:
-        local: {}
-      timeouts:
-        requestMs: 30000
+      effects: [execute]
+      timeouts: { requestMs: 30000 }
+
+    - id: cmd.run
+      title: Run Shell Command
+      description: |
+        Run an arbitrary shell command via `sh -c` with full host privileges
+        (governance-gated). Used by the agent `bash` facade.
+      inputSchema: CmdRunInput
+      outputSchema: CmdRunOutput
+      risk: high
+      effects: [execute, write]
+      timeouts: { requestMs: 30000 }
+
+    - id: cmd.run_streaming
+      title: Run Shell Command (Streaming)
+      description: Run a shell command and stream stdout/stderr line-by-line. Same risk profile as cmd.run.
+      inputSchema: CmdRunStreamingInput
+      outputSchema: CmdRunStreamingOutput
+      risk: high
+      effects: [execute, write]
+      timeouts: { requestMs: 60000 }
+
+    - id: cmd.run_powershell
+      title: Run PowerShell Script
+      description: Run a PowerShell script via pwsh (PowerShell 7+) or powershell.exe fallback on Windows.
+      inputSchema: CmdRunPowerShellInput
+      outputSchema: CmdRunPowerShellOutput
+      risk: high
+      effects: [execute, write]
+      timeouts: { requestMs: 30000 }
+
+    # ---------- Web ----------
+    - id: web.fetch
+      title: Fetch URL
+      description: Fetch web page content over HTTP/HTTPS
+      inputSchema: WebFetchInput
+      outputSchema: WebFetchOutput
+      risk: low
+      effects: [read, network]
+      timeouts: { requestMs: 10000 }
+
+    - id: web.search
+      title: Web Search
+      description: Search web content using a configured provider
+      inputSchema: WebSearchInput
+      outputSchema: WebSearchOutput
+      risk: low
+      effects: [read, network]
+      timeouts: { requestMs: 10000 }
+
+    # ---------- Audio / Speech ----------
+    - id: audio.transcribe
+      title: Transcribe Audio (Whisper)
+      description: Transcribe an audio file via OpenAI Whisper
+      inputSchema: AudioTranscribeInput
+      outputSchema: AudioTranscribeOutput
+      risk: low
+      effects: [read, network]
+      timeouts: { requestMs: 120000 }
+
+    - id: audio.synthesize
+      title: Synthesize Speech (TTS)
+      description: Generate audio from text via OpenAI / ElevenLabs TTS
+      inputSchema: AudioSynthesizeInput
+      outputSchema: AudioSynthesizeOutput
+      risk: medium
+      effects: [write, network]
+      timeouts: { requestMs: 120000 }
+
+    # ---------- Image generation ----------
+    - id: image.generate
+      title: Generate Image
+      description: Generate an image via DALL-E / Stability and write to workspace
+      inputSchema: ImageGenerateInput
+      outputSchema: ImageGenerateOutput
+      risk: medium
+      effects: [write, network]
+      timeouts: { requestMs: 120000 }
+
+    # ---------- Vision ----------
+    - id: vision.analyze_image
+      title: Analyze Image (Vision)
+      description: Send an image to a vision-capable LLM and return text
+      inputSchema: VisionAnalyzeInput
+      outputSchema: VisionAnalyzeOutput
+      risk: low
+      effects: [read, network]
+      timeouts: { requestMs: 45000 }
+
+    # ---------- Verifier ----------
+    - id: verify.numeric_aggregate
+      title: Verify Numeric Aggregate
+      description: |
+        Re-compute sum/avg/count over a CSV column and compare against a claimed
+        value. Used as an LLM self-check gate in numeric/business workflows.
+      inputSchema: VerifyNumericInput
+      outputSchema: VerifyNumericOutput
+      risk: low
+      effects: [read]
+      timeouts: { requestMs: 15000 }
+
+    # ---------- Slide rendering ----------
+    - id: slides.render
+      title: Render slide deck (Markdown → PPTX)
+      description: |
+        Convert a Markdown deck source (--- separators, # title, - bullet lines)
+        into a real PowerPoint .pptx via python-pptx. Returns the file path,
+        slide count, and pptx MIME type.
+      inputSchema: SlidesRenderInput
+      outputSchema: SlidesRenderOutput
+      risk: medium
+      effects: [write, execute]
+      timeouts: { requestMs: 60000 }
+
+    # ---------- Security ----------
+    - id: security.osv_scan
+      title: OSV Vulnerability Scan
+      description: Scan a lockfile for known vulnerabilities via cargo-audit / OSV
+      inputSchema: OsvScanInput
+      outputSchema: OsvScanOutput
+      risk: low
+      effects: [read, network]
+      timeouts: { requestMs: 60000 }

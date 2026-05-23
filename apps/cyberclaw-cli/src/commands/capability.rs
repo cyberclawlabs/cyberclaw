@@ -1,9 +1,10 @@
 //! Capability 管理命令
 
 use crate::cli_state::CliState;
-use crate::http_client::{post_json, server_url};
+use crate::http_client::{get_json, post_json, server_url};
 use crate::output::OutputFormat;
 use clap::{Args, Subcommand};
+use serde::Deserialize;
 
 #[derive(Debug, Subcommand)]
 pub enum CapabilityCommand {
@@ -38,10 +39,10 @@ pub struct DiscoverForGoalArgs {
 
 pub async fn handle_capability_command(
     cmd: CapabilityCommand,
-    state: &CliState,
+    _state: &CliState,
 ) -> anyhow::Result<()> {
     match cmd {
-        CapabilityCommand::List(args) => handle_list(args, state).await,
+        CapabilityCommand::List(args) => handle_list(args).await,
         CapabilityCommand::DiscoverForGoal(args) => discover_for_goal(args).await,
     }
 }
@@ -103,33 +104,59 @@ fn friendly_cap_error(e: &anyhow::Error) -> String {
     }
 }
 
-async fn handle_list(args: CapabilityListArgs, state: &CliState) -> anyhow::Result<()> {
-    // 从 connector_registry 获取所有 capabilities
-    let capabilities = state.connector_registry.list_capabilities();
+#[derive(Debug, Deserialize)]
+struct CapabilitySummary {
+    id: String,
+    title: String,
+    connector_id: String,
+    risk_level: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CapabilityListResponse {
+    total: usize,
+    capabilities: Vec<CapabilitySummary>,
+}
+
+async fn handle_list(args: CapabilityListArgs) -> anyhow::Result<()> {
+    let server = server_url(None);
+    let resp: CapabilityListResponse = get_json(&server, "/api/v1/capabilities")
+        .await
+        .map_err(|e| anyhow::anyhow!("❌ capability list failed: {}", friendly_cap_error(&e)))?;
 
     match args.format {
         OutputFormat::Json => {
-            // 简单的 JSON 输出
-            let json_data: Vec<_> = capabilities
+            let json_data: Vec<_> = resp
+                .capabilities
                 .iter()
-                .map(|(connector, cap)| {
+                .map(|cap| {
                     serde_json::json!({
-                        "connector": connector,
-                        "capability": cap
+                        "id": cap.id,
+                        "title": cap.title,
+                        "connector_id": cap.connector_id,
+                        "risk_level": cap.risk_level,
+                        "description": cap.description,
                     })
                 })
                 .collect();
             println!("{}", serde_json::to_string_pretty(&json_data)?);
         }
         OutputFormat::Text => {
-            if capabilities.is_empty() {
+            if resp.total == 0 {
                 println!("No capabilities available.");
-                println!("  Register connectors first using 'cyberclaw connector register'");
+                println!("  Server reports an empty capability registry. Check that connectors loaded at startup.");
             } else {
-                println!("Total capabilities: {}\n", capabilities.len());
-                for (connector, cap) in capabilities {
-                    println!("Connector: {}", connector);
-                    println!("Capability: {}", cap);
+                println!("Total capabilities: {}\n", resp.total);
+                for cap in resp.capabilities {
+                    println!(
+                        "{}  ({})  risk={}",
+                        cap.id, cap.connector_id, cap.risk_level
+                    );
+                    println!("  title: {}", cap.title);
+                    if let Some(desc) = cap.description {
+                        println!("  description: {}", desc);
+                    }
                     println!("---");
                 }
             }

@@ -1,0 +1,137 @@
+# Signer Vault Connector — example configuration
+#
+# 这是 wallet-eth / safe-multisig 等所有需要签名的 connector 的共同后端。
+# 把"持有私钥"这一职责从业务 connector 中抽出，统一接给一个或多个签名后端
+# (keystore JSON / cloud KMS / HSM / 硬件钱包 / SSV 远程签名)。
+#
+# 关键设计：业务 connector 不接触私钥。它们只持有 signer_id，签名调用走
+# 这个 vault；vault 内部决定调哪个 backend、谁可以使用、需要几个审批。
+#
+# Capability 划分：
+#   list / pubkey   — Low / Low      （读类）
+#   sign.message    — High           （EIP-191 个人签名）
+#   sign.typed      — High           （EIP-712 typed data，Safe + Permit 用）
+#   sign.tx.eip1559 — High           （交易签名）
+#   sign.raw.bytes  — Critical       （任意字节签名，绝大多数业务不该用）
+
+[connector]
+id          = "signer-vault"
+name        = "Signer Vault Connector"
+version     = "1.0.0"
+description = "Centralized signer abstraction over keystore / KMS / HSM / hardware wallets"
+runtime     = "native"
+subtype     = "web3.signing.vault"
+
+# ──────────────────────────────────────────────────────────────────────
+# 后端注册
+# ──────────────────────────────────────────────────────────────────────
+# 每个 [[signer]] 块注册一个 signer_id。业务 connector 引用 signer_id，
+# 不接触下游 backend 配置。
+# ──────────────────────────────────────────────────────────────────────
+
+[[signer]]
+id          = "ops-treasury-1"
+description = "Treasury operations EOA — used by wallet-eth"
+backend     = "keystore"                          # keystore | aws-kms | gcp-kms | yubihsm | ledger | trezor | remote
+[signer.keystore]
+path        = "${KEYSTORE_PATH}"                  # encrypted JSON keystore (V3)
+password_env = "KEYSTORE_PASSWORD"                # 不要直接写明文密码
+address     = "${OPS_TREASURY_ADDRESS}"           # 用于事先校验 keystore 地址匹配
+
+[[signer]]
+id          = "ops-multisig-owner-A"
+description = "Owner A of treasury Safe — used by safe-multisig"
+backend     = "aws-kms"
+[signer.aws_kms]
+region      = "us-east-1"
+key_id      = "${KMS_KEY_ID_OWNER_A}"             # KMS asymmetric ECDSA_SECG_P256K1
+ethereum_address = "${OWNER_A_ADDRESS}"           # 必填，用于审计与地址校验
+assume_role_arn  = "${KMS_ASSUME_ROLE_ARN}"
+
+[[signer]]
+id          = "ops-relay-1"
+description = "Relayer EOA for executing fully-signed Safe txs"
+backend     = "keystore"
+[signer.keystore]
+path        = "${RELAY_KEYSTORE_PATH}"
+password_env = "RELAY_KEYSTORE_PASSWORD"
+
+[[signer]]
+id          = "hardware-cold"
+description = "Cold ledger device — only signs critical operations"
+backend     = "ledger"
+[signer.ledger]
+hd_path     = "m/44'/60'/0'/0/0"
+require_physical_confirmation = true              # 设备物理按键确认必须
+
+# ──────────────────────────────────────────────────────────────────────
+# 全局策略
+# ──────────────────────────────────────────────────────────────────────
+[policy]
+# 这个 connector 自身的能力级审批要求。具体每个 signer 的细化策略可以
+# 在 governance.toml 中覆盖（按 signer_id allowlist）。
+default_required_approvals = 1
+
+# 防签名前缀混淆：拒绝任何看起来像 EIP-191 / EIP-712 / RLP 编码 tx 的
+# "raw bytes" 调用，强制走对应的 typed capability。
+strict_payload_classification = true
+
+# 如果在 30s 内对同一 signer 发起 N 次签名，视为可疑并触发 security event
+signature_rate_anomaly = { window_secs = 30, threshold = 5 }
+
+# ──────────────────────────────────────────────────────────────────────
+# 能力
+# ──────────────────────────────────────────────────────────────────────
+
+# 读类（Low）
+[[capabilities]]
+id          = "signer.list"
+description = "List registered signer IDs (no key material exposed)"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "signer.export.pubkey"
+description = "Export the public key / Ethereum address for a signer"
+enabled     = true
+risk        = "Low"
+
+# 签名类（High）—— 三类已知 envelope，治理链强审批
+[[capabilities]]
+id                 = "signer.sign.message"
+description        = "Sign an EIP-191 personal_sign message (will hash with the personal_sign prefix)"
+enabled            = true
+risk               = "High"
+required_approvals = 1
+
+[[capabilities]]
+id                 = "signer.sign.typed.eip712"
+description        = "Sign EIP-712 typed data — used by Permit, Safe owner confirmations, off-chain orders"
+enabled            = true
+risk               = "High"
+required_approvals = 1
+
+[[capabilities]]
+id                 = "signer.sign.tx.eip1559"
+description        = "Sign an EIP-1559 transaction envelope. Returns raw signed tx; does NOT broadcast."
+enabled            = true
+risk               = "High"
+required_approvals = 1
+
+# 危险类（Critical）—— 任意字节签名，能签出后续任何东西
+[[capabilities]]
+id                 = "signer.sign.raw.bytes"
+description        = "Sign arbitrary 32-byte digest. Disabled by default — almost always indicates a missing typed-data path."
+enabled            = false
+risk               = "Critical"
+required_approvals = 2
+
+# ──────────────────────────────────────────────────────────────────────
+# 高级
+# ──────────────────────────────────────────────────────────────────────
+[advanced]
+default_timeout_ms = 10000
+# 强制：每次签名前重新校验 signer 的链上地址（防 keystore 被替换 / KMS 切 key）
+verify_address_before_sign = true
+# 全程不把私钥 / mnemonic 写日志；只写 signer_id + algorithm + payload hash
+audit_redact_payload = false              # payload 本身可审计，但不会写到日志的 INFO 级

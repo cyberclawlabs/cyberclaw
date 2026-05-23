@@ -20,6 +20,9 @@ tracing.workspace = true
 uuid.workspace = true
 tempfile = "3"
 cyberclaw-governance.workspace = true
+# R2 (sprint 3 PART A, 2026-05-21) — `verify.rs` uses regex for code-block
+# extraction + RegexAssertVerifier pattern matching.
+regex.workspace = true
 
 # Tool Calling 支持 (可选)
 cyberclaw-llm-bridge = { path = "../cyberclaw-llm-bridge", optional = true }

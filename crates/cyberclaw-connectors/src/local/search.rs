@@ -62,10 +62,19 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
             CapabilityFacade {
                 name: "file_search".to_string(),
                 description: "Search file contents using a regular expression or literal pattern \
-                    (ripgrep-backed). Supports output modes: `files_with_matches` (default, \
-                    returns file paths), `content` (returns matching lines with optional context), \
-                    and `count` (returns per-file match counts). Results are bounded at \
-                    `head_limit` (default 250). Risk: Low — read-only."
+                    (ripgrep-backed). \
+                    **CRITICAL — counting tasks**: when the user asks \"how many lines\" or \
+                    \"count occurrences\", you MUST set `output_mode=\"count\"` — this returns \
+                    accurate per-file match totals. Reporting a count from `output_mode=\"content\"` \
+                    is unreliable because results are limited by `head_limit` (default 250). \
+                    **CRITICAL — case sensitivity**: default is `case_insensitive=true` \
+                    (matches grep -i convention). Most interactive queries want this. \
+                    Only pass `case_insensitive=false` when matching a class name, constant \
+                    identifier, or env-var key where casing distinguishes intent. \
+                    Output modes: `files_with_matches` (default, returns file paths), `content` \
+                    (returns matching lines with optional context), and `count` (returns per-file \
+                    match counts — use for any 'how many' question). \
+                    Results are bounded at `head_limit` (default 250). Risk: Low — read-only."
                     .to_string(),
                 connector_id: connector_id.clone(),
                 capability_id: CapabilityId::from_string("search.grep".to_string()).unwrap(),
@@ -94,7 +103,11 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                         },
                         "case_insensitive": {
                             "type": "boolean",
-                            "description": "Case-insensitive search (default false)"
+                            "description": "Case-insensitive search (DEFAULT TRUE — matches \
+                                grep -i convention). Most interactive queries want \
+                                case-insensitive ('error' should match Error/ERROR/error). \
+                                Pass FALSE explicitly only when matching a class name, \
+                                constant identifier, or env-var key where casing matters."
                         },
                         "context_before": {
                             "type": "integer",
@@ -111,7 +124,11 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                         "output_mode": {
                             "type": "string",
                             "enum": ["files_with_matches", "content", "count"],
-                            "description": "Output mode (default: files_with_matches)"
+                            "description": "Output mode (default: files_with_matches). \
+                                **Use 'count' when user asks 'how many lines/matches/occurrences'** \
+                                — returns reliable per-file totals not affected by head_limit. \
+                                'content' truncates at head_limit so deriving counts from it is \
+                                wrong. 'files_with_matches' is for 'which file contains X'."
                         },
                         "head_limit": {
                             "type": "integer",
@@ -520,6 +537,14 @@ fn grep_fallback(
     let mut matches: Vec<SearchMatch> = Vec::new();
     let mut files_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut files: Vec<String> = Vec::new();
+    // GAP-fix (2026-05-23, v1.2 P2): Count mode previously shared the
+    // FilesWithMatches branch, so it returned 1-per-file instead of
+    // per-file line totals. B-L2-2 (count import lines across .py files)
+    // was returning 4 (= 4 files) instead of 7 (= sum of import lines per
+    // file). Track per-file line counts here and surface them in the
+    // `counts` vec + `count` total.
+    let mut per_file_count: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
     let mut truncated = false;
 
     for line in stdout.lines() {
@@ -538,7 +563,7 @@ fn grep_fallback(
                                 break;
                             }
                         }
-                        GrepOutputMode::FilesWithMatches | GrepOutputMode::Count => {
+                        GrepOutputMode::FilesWithMatches => {
                             if files_seen.insert(file_part.to_string()) {
                                 files.push(file_part.to_string());
                                 if files.len() >= head_limit {
@@ -547,21 +572,35 @@ fn grep_fallback(
                                 }
                             }
                         }
+                        GrepOutputMode::Count => {
+                            *per_file_count.entry(file_part.to_string()).or_insert(0) += 1;
+                        }
                     }
                 }
             }
         }
     }
 
+    // Materialise per_file_count → counts vec (sorted by file for determinism)
+    let counts: Vec<SearchCountEntry> = {
+        let mut v: Vec<SearchCountEntry> = per_file_count
+            .into_iter()
+            .map(|(file, count)| SearchCountEntry { file, count })
+            .collect();
+        v.sort_by(|a, b| a.file.cmp(&b.file));
+        v
+    };
+
     let total = match &input.output_mode {
         GrepOutputMode::Content => matches.len(),
-        GrepOutputMode::FilesWithMatches | GrepOutputMode::Count => files.len(),
+        GrepOutputMode::FilesWithMatches => files.len(),
+        GrepOutputMode::Count => counts.iter().map(|c| c.count as usize).sum(),
     };
 
     Ok(SearchGrepOutput {
         matches,
         files,
-        counts: Vec::new(), // count mode not supported in fallback
+        counts,
         count: u32::try_from(total).unwrap_or(u32::MAX),
         truncated,
     })
@@ -1025,6 +1064,54 @@ mod tests {
         let output: SearchGrepOutput = serde_json::from_value(result).unwrap();
         // The result should be parseable; count >= 0
         let _ = output.count;
+    }
+
+    /// v1.2 P2 regression — Count mode must return per-line totals (sum
+    /// across files), NOT file count. Before the 2026-05-23 fix, fallback
+    /// grep treated Count same as FilesWithMatches, so this test would
+    /// return 2 (= 2 files containing "import") instead of 5 (= total
+    /// import lines across both files). Discovered via B-L2-2 business
+    /// matrix: "count import lines across .py files" expected 7, cb
+    /// answered 4 (4 files).
+    #[tokio::test]
+    async fn grep_count_mode_returns_per_line_total_not_file_count() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            &tmp,
+            "auth.py",
+            "import jwt\nimport os\nfrom logging import getLogger\n",
+        );
+        write_file(&tmp, "billing.py", "import stripe\n");
+        write_file(&tmp, "checkout.py", "import json\nimport requests\n");
+        // total "^import" lines: auth=2, billing=1, checkout=2 → 5
+        let connector = make_connector(&tmp);
+        let req = make_request(
+            &connector,
+            "search.grep",
+            serde_json::json!({
+                "pattern": "^import ",
+                "output_mode": "count"
+            }),
+        );
+        let result = grep(&connector, req).await.unwrap();
+        let output: SearchGrepOutput = serde_json::from_value(result).unwrap();
+        assert_eq!(
+            output.count, 5,
+            "Count mode must sum per-line matches (5), not file count (3). \
+             Got count={}, counts={:?}",
+            output.count, output.counts
+        );
+        // counts vec must have 3 entries (one per file)
+        assert_eq!(output.counts.len(), 3, "expected per-file counts for 3 files");
+        // Per-file values: auth.py=2, billing.py=1, checkout.py=2
+        let by_file: std::collections::HashMap<&str, u32> = output
+            .counts
+            .iter()
+            .map(|c| (c.file.rsplit('/').next().unwrap_or(""), c.count))
+            .collect();
+        assert_eq!(by_file.get("auth.py").copied().unwrap_or(0), 2);
+        assert_eq!(by_file.get("billing.py").copied().unwrap_or(0), 1);
+        assert_eq!(by_file.get("checkout.py").copied().unwrap_or(0), 2);
     }
 
     // -----------------------------------------------------------------------

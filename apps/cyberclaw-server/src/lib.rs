@@ -13,6 +13,7 @@ pub mod connector_drift;
 pub mod cron;
 pub mod error;
 pub mod feedback_loop;
+pub mod installed_packages;
 pub mod memory_cleanup;
 pub mod memory_connector;
 pub mod middleware;
@@ -163,6 +164,10 @@ pub fn create_router_with_config(state: Arc<AppState>, config: ServerConfig) -> 
         .merge(api::create_tools_router())
         .merge(api::create_audit_router())
         .merge(api::create_plugins_router())
+        // v1.x — unified package management surface (`/api/v2/packages`,
+        // `/api/v2/status`). Replaces the CLI's process-local
+        // InMemoryRegistry; server is now the single source of truth.
+        .merge(api::create_packages_router())
         .merge(api::create_uploads_router())
         // Sprint 11 W2 L1 — admin UI aggregate endpoints.
         .merge(api::create_governance_router())

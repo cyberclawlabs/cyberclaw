@@ -95,7 +95,26 @@ artifacts/
 # Generated public release artifacts (build-release.sh output)
 /release/
 web/dist-vite/
+.matrix-fixtures/
+tools/business-matrix/transcripts/
+.cyberclaw/
 
-# WebUI runtime uploads (user-supplied content, not source)
-web/uploads/*
-!web/uploads/.gitkeep
+# Research / external repo clones (per-developer scratch)
+claw-research/
+agi-t3-doc.md
+
+# Accidental Playwright accessibility-tree snapshot exports
+/cyberclaw_chat.yml
+/cyberclaw_govern.yml
+/cyberclaw_skills.yml
+
+# Playwright accessibility-tree snapshot exports (Hermes/Memory analysis)
+/hermes_*.yml
+/memory_*.yml
+/region_revenue.json
+
+# Runtime user uploads (per-developer, not for VCS)
+uploads/
+
+# Playwright debugging screenshots
+web/playwright-screenshots/

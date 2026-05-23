@@ -99,6 +99,15 @@ pub struct ContainerConfig {
 
     /// Auto-remove container after execution
     pub auto_remove: bool,
+
+    /// When `read_only_root` is true, the runtime normally adds an
+    /// automatic `--tmpfs /tmp:rw,noexec,nosuid,size=100m` so processes
+    /// can write to `/tmp`. Set this to `true` to suppress that — the
+    /// caller is then responsible for declaring its own `/tmp` mount via
+    /// `volumes`. Used by R3 `SandboxProfile` resolution to avoid docker's
+    /// "duplicate mount point for /tmp" rejection when a profile already
+    /// owns `/tmp`.
+    pub skip_implicit_tmp_tmpfs: bool,
 }
 
 impl Default for ContainerConfig {
@@ -112,6 +121,9 @@ impl Default for ContainerConfig {
             volumes: HashMap::new(),
             read_only_root: true,
             auto_remove: true,
+            // Legacy default — runtime keeps adding the implicit `--tmpfs /tmp`
+            // for any caller that did not opt into a `SandboxProfile`.
+            skip_implicit_tmp_tmpfs: false,
         }
     }
 }
@@ -484,16 +496,42 @@ impl ContainerRuntime {
         // Read-only root filesystem
         if container_config.read_only_root {
             cmd.arg("--read-only");
-            // Add tmpfs for /tmp to allow temporary writes
-            cmd.arg("--tmpfs").arg("/tmp:rw,noexec,nosuid,size=100m");
+            // Add tmpfs for /tmp to allow temporary writes UNLESS the
+            // caller (via SandboxProfile.validate_and_resolve) already
+            // declared its own /tmp mount and asked us to suppress this.
+            // Emitting both `--tmpfs /tmp` AND `-v <host>:/tmp` is what
+            // produced "duplicate mount point for /tmp" before R3.
+            if !container_config.skip_implicit_tmp_tmpfs {
+                cmd.arg("--tmpfs").arg("/tmp:rw,noexec,nosuid,size=100m");
+            } else {
+                debug!(
+                    "Skipping implicit --tmpfs /tmp: SandboxProfile owns /tmp via volumes"
+                );
+            }
         }
 
-        // Working directory mount
+        // Working directory mount — v1.2 P3 (2026-05-23):
+        // Mount the host cwd at the SAME absolute path inside the container,
+        // not at /workspace. This lets commands with absolute host paths
+        // resolve naturally — e.g. `cat /Users/foo/repo/data.csv` works
+        // inside the container because /Users/foo/repo IS mounted at
+        // /Users/foo/repo (host path = container path).
+        //
+        // Before this fix: cwd → /workspace, so `cat /Users/foo/...`
+        // failed with "no such file" inside the container. Agent prompts
+        // routinely use absolute host paths (the only way to point at a
+        // specific fixture), and asking the model to translate every
+        // absolute path to /workspace-relative is unrealistic.
+        //
+        // Side effect: container sees the host's absolute path structure
+        // for the workspace dir. Acceptable for dev / isolated profiles
+        // (per-developer environment). Container still has read-only root
+        // and resource limits — sandbox guarantees are preserved.
         if container_config.mount_workspace {
             if let Some(ref cwd) = config.working_directory {
-                cmd.arg("-v")
-                    .arg(format!("{}:/workspace:rw", cwd.display()));
-                cmd.arg("-w").arg("/workspace");
+                let cwd_str = cwd.display().to_string();
+                cmd.arg("-v").arg(format!("{}:{}:rw", cwd_str, cwd_str));
+                cmd.arg("-w").arg(&cwd_str);
             }
         }
 
@@ -589,6 +627,51 @@ impl ContainerRuntime {
                     ]),
                 })
             }
+        }
+    }
+
+    /// Build a `ContainerConfig` from a fully-resolved `EffectiveSandbox`.
+    ///
+    /// This is the R3 entry point: callers that hold a `SandboxProfile`
+    /// resolve it first via `validate_and_resolve()`, then feed the
+    /// resulting `EffectiveSandbox` here to obtain a `ContainerConfig`
+    /// that is **guaranteed conflict-free** with the runtime's own
+    /// implicit mounts (notably the legacy `--tmpfs /tmp` branch).
+    pub fn config_from_sandbox(
+        sandbox: &crate::sandbox::EffectiveSandbox,
+    ) -> ContainerConfig {
+        let mut volumes: HashMap<PathBuf, PathBuf> = HashMap::new();
+        for (container_path, spec) in &sandbox.mounts {
+            // Bind mounts only — tmpfs mounts would need a different
+            // CLI surface (`--tmpfs ...`) which the builtin profiles
+            // do not currently use. If you add a tmpfs mount to a
+            // profile in the future, extend ContainerConfig with a
+            // separate `tmpfs_mounts: Vec<MountSpec>` field.
+            if spec.tmpfs {
+                debug!(
+                    profile = %sandbox.profile_id,
+                    "tmpfs mount in profile not yet supported by ContainerConfig — skipping"
+                );
+                continue;
+            }
+            if let Some(host) = &spec.host_path {
+                volumes.insert(host.clone(), container_path.clone());
+            }
+        }
+
+        ContainerConfig {
+            image: sandbox.image.clone(),
+            network: sandbox.network.clone(),
+            memory_limit_mb: sandbox.memory_limit_mb,
+            cpu_limit: sandbox.cpu_limit,
+            mount_workspace: sandbox.mount_workspace,
+            volumes,
+            read_only_root: sandbox.read_only_root,
+            auto_remove: true,
+            // Critical: when the profile declared its own /tmp mount,
+            // `needs_implicit_tmp_tmpfs` is false → runtime must skip
+            // its `--tmpfs /tmp` emit.
+            skip_implicit_tmp_tmpfs: !sandbox.needs_implicit_tmp_tmpfs,
         }
     }
 }

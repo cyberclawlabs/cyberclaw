@@ -3,7 +3,7 @@ id = "example-plugin"
 name = "Example Plugin"
 version = "0.1.0"
 description = "An example CyberClaw plugin demonstrating hooks and capabilities"
-authors = ["CyberClaw Team <info@cyberclawlabs.ai>"]
+authors = ["CyberClaw Team <team@cyberclaw.io>"]
 
 [plugin.library]
 path = "target/release/libexample_plugin.so"
@@ -29,7 +29,7 @@ network_connections = 10
 
 [plugin.metadata]
 homepage = "https://cyberclaw.io/plugins/example"
-repository = "https://github.com/cyberclawlabs/example-plugin"
+repository = "https://github.com/cyberclaw/example-plugin"
 license = "Apache-2.0"
 keywords = ["example", "demo", "hooks"]
 categories = ["development", "testing"]

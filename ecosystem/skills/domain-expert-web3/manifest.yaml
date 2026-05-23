@@ -1,0 +1,87 @@
+apiVersion: cyberclaw.io/v2
+kind: Skill
+id: cyberclaw/domain-expert-web3
+version: 0.1.0
+name: domain-expert-web3
+displayName: Domain Expert — Web3 / DeFi
+summary: Operational expertise for EVM ecosystem work — Safe multisig, gas economics, ERC-20/721, reentrancy guards, Tenderly simulation, Forta monitoring, OpenZeppelin Defender, treasury runbooks.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - domain-expert
+  - web3
+  - defi
+  - evm
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: SKILL.md
+  files:
+    - SKILL.md
+    - references/multisig-patterns.md
+    - references/reentrancy-guards.md
+    - references/gas-economics.md
+spec:
+  format: claude-compatible
+  entryFile: SKILL.md
+  referencesDir: references
+  # AND-of-OR matching:
+  #   group 1 — the Web3 concept axis (token / mechanism / actor)
+  #   group 2 — the Web3 substrate axis (chain / wallet / activity)
+  # A prompt that touches BOTH axes is in our domain. Either alone is
+  # ambiguous (e.g. "eth" can mean Ethernet; "wallet" can mean leather goods).
+  auto_bind:
+    keywords:
+      - any:
+          - multisig
+          - "multi-sig"
+          - "Safe multisig"
+          - "Gnosis Safe"
+          - "Safe{Wallet}"
+          - reentrancy
+          - "ERC-20"
+          - ERC20
+          - "ERC-721"
+          - ERC721
+          - "ERC-1155"
+          - "smart contract"
+          - solidity
+          - DeFi
+          - treasury
+          - DAO
+          - Tenderly
+          - Forta
+          - "OpenZeppelin"
+          - "EIP-1559"
+          - "EIP-2612"
+          - permit
+          - allowance
+          - approve
+      - any:
+          - USDC
+          - USDT
+          - WETH
+          - DAI
+          - ETH
+          - Ethereum
+          - mainnet
+          - on-chain
+          - "on chain"
+          - gas
+          - gwei
+          - wei
+          - blockchain
+          - wallet
+          - Etherscan
+          - Uniswap
+          - Curve
+          - Aave
+          - Compound
+          - rollup
+          - L2
+          - Arbitrum
+          - Optimism
+          - Base
+    priority: 80

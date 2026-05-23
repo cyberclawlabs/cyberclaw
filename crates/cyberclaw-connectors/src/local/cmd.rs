@@ -42,10 +42,12 @@
 //! `crates/cyberclaw-connectors/src/mcp/tool_bridge.rs`.
 
 use super::LocalConnector;
+use crate::sandbox::SandboxProfile;
 use crate::types::*;
 use cyberclaw_core::capability::RiskLevel;
 use cyberclaw_core::facade::{CapabilityFacade, FacadeExposure, ToolsetCategory};
 use cyberclaw_core::ids::{CapabilityId, ConnectorId};
+use cyberclaw_core::manifests::{CapabilityContract, CapabilityTimeouts};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
@@ -308,20 +310,45 @@ const CMD_RUN_BLOCKED_PATTERNS: &[&str] = &[
 /// Override via `CYBERCLAW_CONTAINER_SHARED_TMP=<absolute host path>`. The
 /// host dir is created on first use (best-effort; failure is logged via
 /// the runtime's mount error path rather than blocking the call).
+///
+/// R3 (2026-05-21) — back-compat shim. The single source of truth for the
+/// `/tmp` mount now lives in [`SandboxProfile::dev`]; this helper extracts
+/// the `/tmp` mount from a resolved profile so existing callers and tests
+/// keep working with no behavior change. Marked `#[allow(dead_code)]`
+/// because in-tree call sites have been migrated to the profile API; the
+/// function survives only to keep external/test callers compiling.
+#[allow(dead_code)]
 pub(crate) fn build_shared_container_volumes(
 ) -> std::collections::HashMap<std::path::PathBuf, std::path::PathBuf> {
     use std::collections::HashMap;
-    use std::path::PathBuf;
-    let host_tmp = std::env::var("CYBERCLAW_CONTAINER_SHARED_TMP")
-        .unwrap_or_else(|_| "/tmp/cyberclaw-shared".to_string());
-    let host_path = PathBuf::from(&host_tmp);
-    // Best-effort dir create. If it fails, the container engine will surface
-    // a mount error on first invocation — preferable to silently dropping
-    // the mount and confusing the LLM about why /tmp doesn't persist.
-    let _ = std::fs::create_dir_all(&host_path);
+    let profile = SandboxProfile::dev();
     let mut volumes = HashMap::new();
-    volumes.insert(host_path, PathBuf::from("/tmp"));
+    for spec in &profile.mounts {
+        if let Some(host) = &spec.host_path {
+            volumes.insert(host.clone(), spec.container_path.clone());
+        }
+    }
     volumes
+}
+
+/// Build a [`CapabilityContract`] shim describing the timing constraint
+/// for a `cmd.*` capability so [`SandboxProfile::validate_and_resolve`]
+/// can negotiate the time budget. We only fill `id` and `timeouts` — the
+/// rest of the contract isn't consulted by the resolver.
+fn cmd_capability_shim(cap_id: &str, request_ms: u64) -> CapabilityContract {
+    CapabilityContract {
+        id: cap_id.to_string(),
+        title: cap_id.to_string(),
+        description: None,
+        input_schema: "".to_string(),
+        output_schema: "".to_string(),
+        risk: RiskLevel::High,
+        effects: vec![],
+        placement: None,
+        timeouts: CapabilityTimeouts {
+            request_ms: Some(request_ms),
+        },
+    }
 }
 
 /// Reject a `cmd.run` invocation if the literal command string matches any
@@ -475,26 +502,24 @@ pub async fn exec(
 
     // Sprint 19 W4 — when a ContainerRuntime is wired (operator opted
     // into Container isolation via `LocalConnector::with_container_runtime`),
-    // run the whitelisted command inside an alpine container with no
-    // network and the workspace mounted read-only by default. This is the
-    // production-correct path for High-risk capabilities. When no
-    // ContainerRuntime is configured, falls back to the legacy bare
-    // subprocess path below (preserved for tests + hosts without
-    // docker/podman).
+    // run the whitelisted command inside a container governed by the
+    // R3 `isolated` SandboxProfile (no network, shared /tmp, ripgrep/jq/
+    // python3 preinstalled). This is the production-correct path for
+    // High-risk capabilities. When no ContainerRuntime is configured,
+    // falls back to the legacy bare subprocess path below.
     if let Some(rt) = connector.container_runtime.as_ref() {
-        use crate::runtime::{ContainerConfig, NetworkMode, ProcessConfig};
+        use crate::runtime::ProcessConfig;
 
-        let container_cfg = ContainerConfig {
-            image: std::env::var("CYBERCLAW_CONTAINER_IMAGE")
-                .unwrap_or_else(|_| "alpine:3.19".to_string()),
-            network: NetworkMode::None,
-            memory_limit_mb: Some(512),
-            cpu_limit: Some(1.0),
-            mount_workspace: true,
-            volumes: build_shared_container_volumes(),
-            read_only_root: true,
-            auto_remove: true,
-        };
+        // R3 — single source of truth for mounts/network/image lives in
+        // the sandbox profile, not inline here. `cmd.exec` is whitelisted
+        // and historically had NetworkMode::None → use `isolated`.
+        let profile = SandboxProfile::isolated();
+        let cap_shim = cmd_capability_shim("cmd.exec", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let effective = profile
+            .validate_and_resolve(&cap_shim)
+            .map_err(|e| anyhow::anyhow!("sandbox profile resolve failed: {}", e))?;
+        let container_cfg = crate::runtime::ContainerRuntime::config_from_sandbox(&effective);
+
         let process_cfg = ProcessConfig {
             timeout: timeout_duration,
             kill_grace_period: Duration::from_secs(5),
@@ -508,10 +533,11 @@ pub async fn exec(
         };
 
         info!(
-            "cmd.exec: dispatching '{}' ({} args) inside container image={}",
+            "cmd.exec: dispatching '{}' ({} args) inside container image={} profile={}",
             cmd_name,
             args.len(),
-            container_cfg.image
+            container_cfg.image,
+            effective.profile_id,
         );
 
         let result = rt
@@ -650,28 +676,22 @@ pub async fn run(
     // network=none + read-only root. Native fallback path only kicks in
     // when no container runtime is configured (legacy / test scenarios).
     if let Some(rt) = connector.container_runtime.as_ref() {
-        use crate::runtime::{ContainerConfig, NetworkMode, ProcessConfig};
+        use crate::runtime::ProcessConfig;
 
-        // v1.0-rc13: default to `python:3.12-slim` instead of `alpine:3.19`.
-        // alpine is too minimal — no bash, no shasum, no python — which
-        // breaks 95% of LLM-emitted commands. python:3.12-slim has bash,
-        // standard coreutils, and python for the typical agent workload
-        // (web_search → file_write → python compute). Override with
-        // CYBERCLAW_CONTAINER_IMAGE for richer (node:20, rust:1.75) or
-        // smaller (debian:slim, alpine) workloads.
-        let container_cfg = ContainerConfig {
-            image: std::env::var("CYBERCLAW_CONTAINER_IMAGE")
-                .unwrap_or_else(|_| "python:3.12-slim".to_string()),
-            // Network off by default: prevents data exfil to attacker-
-            // controlled host. CYBERCLAW_CONTAINER_NETWORK=bridge restores.
-            network: NetworkMode::None,
-            memory_limit_mb: Some(512),
-            cpu_limit: Some(1.0),
-            mount_workspace: true,
-            volumes: build_shared_container_volumes(),
-            read_only_root: true,
-            auto_remove: true,
-        };
+        // R3 (2026-05-21) — `cmd.run` is the agent `bash` facade; it
+        // needs the richest tooling (ripgrep / jq / python3) and bridge
+        // network so business tasks like web_search → python compute
+        // work. The `dev` SandboxProfile is the single source of truth.
+        // Image, /tmp mount, workspace mount, network, memory, and CPU
+        // all come from the profile — no inline ContainerConfig assembly
+        // that could collide with the runtime's implicit `--tmpfs /tmp`.
+        let profile = SandboxProfile::dev();
+        let cap_shim = cmd_capability_shim("cmd.run", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let effective = profile
+            .validate_and_resolve(&cap_shim)
+            .map_err(|e| anyhow::anyhow!("sandbox profile resolve failed: {}", e))?;
+        let container_cfg = crate::runtime::ContainerRuntime::config_from_sandbox(&effective);
+
         let process_cfg = ProcessConfig {
             timeout: timeout_duration,
             kill_grace_period: Duration::from_secs(5),
@@ -685,8 +705,9 @@ pub async fn run(
         };
 
         info!(
-            "cmd.run: dispatching inside container image={} (cmd=bash -c)",
-            container_cfg.image
+            "cmd.run: dispatching inside container image={} profile={} (cmd=bash -c)",
+            container_cfg.image,
+            effective.profile_id,
         );
 
         let result = rt
@@ -830,6 +851,91 @@ pub async fn run_streaming(
     let timeout_ms = input.timeout_ms.unwrap_or(DEFAULT_STREAMING_TIMEOUT_MS);
     let timeout_duration = Duration::from_millis(timeout_ms);
     let max_bytes = input.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
+
+    // R3 (2026-05-21) — container dispatch via SandboxProfile when a
+    // ContainerRuntime is wired. The container path buffers output (no
+    // live streaming inside a one-shot `docker run`) but synthesises the
+    // `lines` array by splitting on `\n` so callers still see the
+    // per-line breakdown they expect from this capability.
+    if let Some(rt) = connector.container_runtime.as_ref() {
+        use crate::runtime::ProcessConfig;
+
+        let profile = SandboxProfile::dev();
+        let cap_shim = cmd_capability_shim("cmd.run_streaming", timeout_ms);
+        let effective = profile
+            .validate_and_resolve(&cap_shim)
+            .map_err(|e| anyhow::anyhow!("sandbox profile resolve failed: {}", e))?;
+        let container_cfg = crate::runtime::ContainerRuntime::config_from_sandbox(&effective);
+
+        let process_cfg = ProcessConfig {
+            timeout: timeout_duration,
+            kill_grace_period: Duration::from_secs(5),
+            working_directory: Some(workdir.clone()),
+            environment: input.env.clone(),
+            inherit_env: false,
+            max_memory_bytes: Some(512 * 1024 * 1024),
+            max_file_descriptors: Some(256),
+            capture_stdout: true,
+            capture_stderr: true,
+        };
+
+        info!(
+            "cmd.run_streaming: dispatching inside container image={} profile={} (cmd=bash -c)",
+            container_cfg.image, effective.profile_id,
+        );
+
+        let start = Instant::now();
+        let result = rt
+            .execute_command_in_container(
+                "bash",
+                vec!["-c".to_string(), input.command.clone()],
+                process_cfg,
+                container_cfg,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("container dispatch failed: {}", e))?;
+
+        // Synthesise per-line StreamLine entries from the buffered
+        // container output. Truncate at max_bytes to honour the
+        // capability's contract; mark truncated=true when applicable.
+        let mut lines: Vec<StreamLine> = Vec::new();
+        let mut total_bytes: usize = 0;
+        let mut truncated = false;
+        for line in result.stdout.lines() {
+            total_bytes += line.len() + 1;
+            if total_bytes > max_bytes {
+                truncated = true;
+                break;
+            }
+            lines.push(StreamLine {
+                stream: "stdout".to_string(),
+                line: line.to_string(),
+            });
+        }
+        if !truncated {
+            for line in result.stderr.lines() {
+                total_bytes += line.len() + 1;
+                if total_bytes > max_bytes {
+                    truncated = true;
+                    break;
+                }
+                lines.push(StreamLine {
+                    stream: "stderr".to_string(),
+                    line: line.to_string(),
+                });
+            }
+        }
+
+        return Ok(serde_json::to_value(CmdRunStreamingOutput {
+            lines,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exit_code: result.exit_code,
+            timed_out: result.timed_out,
+            truncated,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        })?);
+    }
 
     // v1.0-rc9: switched from sh to bash — see comment in run_command above
     // for the echo -n / SHA256 silent corruption rationale.
@@ -1006,7 +1112,25 @@ pub async fn run_powershell(
     };
 
     let timeout_ms = input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-    let timeout_duration = Duration::from_millis(timeout_ms);
+
+    // R3 (2026-05-21) — pwsh is not bundled in the default `python:3.12-slim`
+    // container image, so this capability cannot dispatch into the
+    // SandboxProfile container path. We still run the profile resolver
+    // to negotiate the time budget (profile vs capability) so the budget
+    // contract stays consistent with cmd.run / cmd.run_streaming /
+    // cmd.exec. Future work: an operator-configurable
+    // `desired_profile = "powershell"` once a pwsh-bearing base image
+    // is published; until then the profile observation is informational.
+    let ps_profile = SandboxProfile::minimal();
+    let ps_cap_shim = cmd_capability_shim("cmd.run_powershell", timeout_ms);
+    let effective_ps_time = match ps_profile.validate_and_resolve(&ps_cap_shim) {
+        Ok(eff) => eff.time_budget,
+        Err(e) => {
+            warn!("cmd.run_powershell: sandbox profile resolve failed ({}), using raw timeout", e);
+            Duration::from_millis(timeout_ms)
+        }
+    };
+    let timeout_duration = effective_ps_time;
 
     let mut cmd = Command::new(&ps_exe);
     cmd.arg("-NoProfile")

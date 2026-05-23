@@ -255,7 +255,7 @@ pub(super) mod tests {
             ControlPlaneOrchestrator::new(
                 gateway,
                 resolver,
-                registry,
+                registry.clone(),
                 review_queue.clone(),
                 task_manager.clone(),
                 execution_service.clone(),
@@ -274,6 +274,7 @@ pub(super) mod tests {
             task_manager,
             execution_service,
             review_queue,
+            package_registry: registry,
         };
         Arc::new(AppState::new(
             llm_client,

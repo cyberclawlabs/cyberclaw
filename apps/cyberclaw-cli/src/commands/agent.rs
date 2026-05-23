@@ -1,7 +1,7 @@
 //! Agent 运行时管理命令
 
 use crate::cli_state::CliState;
-use crate::http_client::{post_json, server_url};
+use crate::http_client::{get_json, post_json, server_url};
 use crate::output::{print_field, print_separator, OutputFormat};
 use anyhow::Context;
 use chrono::Utc;
@@ -153,13 +153,30 @@ async fn handle_list(args: AgentListArgs, state: &CliState) -> anyhow::Result<()
     Ok(())
 }
 
-async fn handle_run(args: AgentRunArgs, state: &CliState) -> anyhow::Result<()> {
-    use cyberclaw_core::manifests::PackageKind;
-    let exists = state
-        .package_registry
-        .get(PackageKind::Agent, &args.agent_id)
-        .await?
-        .is_some();
+async fn handle_run(args: AgentRunArgs, _state: &CliState) -> anyhow::Result<()> {
+    // v1.x — registry lookup is server-side. Hit `/api/v2/packages?kind=agent`
+    // and check membership instead of the (always-empty) CLI-local registry.
+    #[derive(Deserialize)]
+    struct PkgView {
+        #[serde(default)]
+        id: String,
+    }
+    #[derive(Deserialize)]
+    struct PkgList {
+        #[serde(default)]
+        packages: Vec<PkgView>,
+    }
+
+    let server = server_url(None);
+    let resp: PkgList = get_json(&server, "/api/v2/packages?kind=agent")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "❌ Could not query agent registry: {} (is the server running?)",
+                e
+            )
+        })?;
+    let exists = resp.packages.iter().any(|p| p.id == args.agent_id);
     if !exists {
         anyhow::bail!(
             "agent package not found in registry: {} (run `cyberclaw package install` first)",
@@ -253,18 +270,16 @@ fn save_agent_instances(instances: &[AgentInstanceRecord]) -> anyhow::Result<()>
 mod tests {
     use super::*;
     use crate::cli_state::CliState;
-    use cyberclaw_control_plane::{PackageRecord, PackageSource, RegistryState};
-
-    fn repo_ecosystem_path(segment: &str) -> String {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../ecosystem")
-            .join(segment)
-            .to_string_lossy()
-            .into_owned()
-    }
 
     #[tokio::test]
-    async fn test_agent_run_list_stop_lifecycle() {
+    async fn test_agent_stop_lifecycle() {
+        // v1.x — the prior `test_agent_run_list_stop_lifecycle` test seeded
+        // a process-local `state.package_registry`, which has been removed
+        // (server is now the single source of truth). The end-to-end run +
+        // stop flow now needs a live server; that's covered by the manual
+        // package management verification session in PROJECT_STRUCTURE.md.
+        // Here we keep an isolated `stop`-side check that doesn't require
+        // the registry.
         let state_file = std::env::temp_dir().join(format!(
             "cyberclaw-agent-instances-{}.json",
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -276,43 +291,20 @@ mod tests {
             )
         };
 
+        // Seed a running instance directly, then stop it.
+        let seeded = vec![AgentInstanceRecord {
+            instance_id: "test-instance-1".to_string(),
+            agent_id: "cyberclaw/master-agent".to_string(),
+            status: "running".to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            label: Some("seed".to_string()),
+        }];
+        save_agent_instances(&seeded).expect("seed instances");
+
         let state = CliState::new().expect("state");
-        let loaded = crate::commands::package::resolve_package_reference(&repo_ecosystem_path(
-            "agents/master-agent",
-        ))
-        .await
-        .expect("resolve agent package");
-        let record = PackageRecord {
-            kind: loaded.manifest.kind.clone(),
-            id: loaded.manifest.id.clone(),
-            latest_version: loaded.manifest.version.clone(),
-            installed_versions: vec![loaded.manifest.version.clone()],
-            active_version: Some(loaded.manifest.version.clone()),
-            source: PackageSource::LocalPath(repo_ecosystem_path("agents/master-agent")),
-            state: RegistryState::Active,
-            available_nodes: vec![],
-            runtime_requirements: loaded.manifest.compatibility.runtime.clone(),
-            manifest: loaded.manifest.clone(),
-        };
-        state.package_registry.upsert(record).await.expect("upsert");
-
-        handle_run(
-            AgentRunArgs {
-                agent_id: loaded.manifest.id.clone(),
-                label: Some("test".to_string()),
-            },
-            &state,
-        )
-        .await
-        .expect("run");
-
-        let all_instances = load_agent_instances().expect("load instances");
-        assert_eq!(all_instances.len(), 1);
-        assert_eq!(all_instances[0].status, "running");
-
         handle_stop(
             AgentStopArgs {
-                instance_id: all_instances[0].instance_id.clone(),
+                instance_id: "test-instance-1".to_string(),
             },
             &state,
         )

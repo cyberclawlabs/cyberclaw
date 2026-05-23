@@ -6,7 +6,7 @@ author: CyberClaw Team
 tags: [example, data-processing, automation, productivity]
 license: Apache-2.0
 homepage: https://cyberclaw.io/skills/example
-repository: https://github.com/cyberclawlabs/example-skill
+repository: https://github.com/cyberclaw/example-skill
 
 capabilities:
   - id: process_data
@@ -423,10 +423,10 @@ Apache 2.0 License - 详见 [LICENSE](LICENSE) 文件
 
 ## 🆘 支持
 
-- 📖 文档: https://github.com/cyberclawlabs/cyberclaw/tree/main/docs/skills/example
+- 📖 文档: https://docs.cyberclaw.io/skills/example
 - 💬 论坛: https://forum.cyberclaw.io
-- 🐛 Issues: https://github.com/cyberclawlabs/example-skill/issues
-- 📧 Email: info@cyberclawlabs.ai
+- 🐛 Issues: https://github.com/cyberclaw/example-skill/issues
+- 📧 Email: support@cyberclaw.io
 
 ## 更新日志
 

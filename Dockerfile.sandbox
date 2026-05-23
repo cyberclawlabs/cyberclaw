@@ -1,0 +1,76 @@
+# =============================================================================
+# CyberClaw Sandbox Base Image
+# =============================================================================
+#
+# Container image used by the `dev` and `isolated` SandboxProfiles
+# (crates/cyberclaw-connectors/src/sandbox/profile.rs). Bakes the tools that
+# the corresponding `tools_required` field declares so that:
+#
+#   - `search.grep` finds ripgrep (`rg`) and doesn't silently degrade to the
+#     pure-Rust grep fallback (root cause noted in the v1.x optimization plan
+#     §R3 alongside the duplicate `/tmp` mount).
+#   - `cmd.run "jq …"` and shell pipelines that pipe through `jq` succeed.
+#   - LLM-emitted `python3 -c …` snippets run.
+#
+# Build & tag (matches the default that `SandboxProfile::dev` references via
+# `CYBERCLAW_CONTAINER_IMAGE`):
+#
+#   docker build -t cyberclaw/sandbox:latest -f Dockerfile.sandbox .
+#
+# Operators can override the runtime image with:
+#
+#   CYBERCLAW_CONTAINER_IMAGE=cyberclaw/sandbox:latest
+#
+# This image is intentionally NOT the cyberclaw-server runtime image — the
+# server image (Dockerfile) ships the control plane; this image is the
+# sandbox **target** that `cmd.*` capabilities dispatch INTO.
+# =============================================================================
+
+FROM python:3.12-slim AS sandbox
+
+# Avoid interactive tzdata / apt prompts when extending the base further.
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Tool set required by `SandboxProfile::dev` / `::isolated`:
+#   - bash      : the shell that `cmd.run` invokes via `bash -c`
+#   - coreutils : ls / cat / cut / sort / wc — basic POSIX surface
+#   - ripgrep   : `rg` for `search.grep` (closes "rg unavailable" log spam)
+#   - jq        : JSON filtering pipelines
+#   - python3   : already present from the base image; listed explicitly so
+#                 the dependency is visible if the base ever changes
+#   - ca-certificates : TLS verification when bridge network is active
+#   - curl      : commonly invoked by LLM-emitted business commands
+#   - git       : repository inspection for code-related capabilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash \
+        coreutils \
+        ripgrep \
+        jq \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Self-check — fail the build loudly if any required tool is missing so a
+# broken image never reaches production.
+RUN bash --version && \
+    rg --version && \
+    jq --version && \
+    python3 --version && \
+    curl --version | head -1
+
+# Non-root user matching the ContainerRuntime --user 65534:65534 directive.
+# The base image already has the `nobody` account; we just ensure /tmp is
+# writable by it (the runtime mounts host /tmp/cyberclaw-shared at /tmp so
+# the in-image permissions only matter for the implicit-tmpfs minimal
+# profile case).
+RUN chmod 1777 /tmp || true
+
+# No ENTRYPOINT / CMD — `cmd.run` always passes `bash -c <command>` via the
+# CLI surface, and `cmd.exec` passes the program + args directly. Leaving
+# this image without an entrypoint preserves that contract.
+LABEL org.opencontainers.image.title="CyberClaw Sandbox" \
+      org.opencontainers.image.description="Sandbox target image for cmd.* capabilities. See SandboxProfile." \
+      org.opencontainers.image.source="https://github.com/cyberclawlabs/cyberclaw" \
+      org.opencontainers.image.licenses="Apache-2.0"

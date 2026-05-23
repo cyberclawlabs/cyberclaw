@@ -1,0 +1,163 @@
+# Safe Multisig Connector — example configuration
+#
+# 把 Safe (formerly Gnosis Safe) 的多签流程接入 CyberClaw 治理链。
+# Safe 的 owner / threshold / nonce 模型天然映射到 CyberClaw 的"分级
+# 审批"：Safe 用 N-of-M owner 签名，CyberClaw 用 capability + 风险等级
+# + required_approvals 决定每一步走哪条链路。
+#
+# 关键设计：propose / sign / execute 是三个独立 Capability。CyberClaw
+# 不会"代理 owner 把整个流程跑完"——每一步的副作用都需要明确审批。
+
+[connector]
+id          = "safe-multisig"
+name        = "Safe Multisig Connector"
+version     = "1.0.0"
+description = "Safe (Gnosis Safe) multisig: read config, propose, sign, execute, simulate"
+runtime     = "native"
+subtype     = "web3.evm.multisig.safe"
+
+# ──────────────────────────────────────────────────────────────────────
+# Safe 实例
+# ──────────────────────────────────────────────────────────────────────
+[connector.safe]
+chain_id          = "${SAFE_CHAIN_ID:-1}"
+safe_address      = "${SAFE_ADDRESS}"            # 必填：要操作的 Safe 合约地址
+service_url       = "${SAFE_SERVICE_URL}"        # Safe Transaction Service (官方或自建)
+service_api_key   = "${SAFE_SERVICE_API_KEY}"    # 可选
+
+# ──────────────────────────────────────────────────────────────────────
+# 链 RPC（用于 read / simulate / execute）
+# ──────────────────────────────────────────────────────────────────────
+[connector.network]
+rpc_url           = "${ETH_RPC_URL}"
+fallback_rpc_urls = []
+finality          = "safe"
+
+# ──────────────────────────────────────────────────────────────────────
+# 认证
+# ──────────────────────────────────────────────────────────────────────
+[auth]
+# 这个 connector 自己不持私钥。签 owner 签名调用 signer-vault。
+# 同一 Safe 的多个 owner 通常对应不同 signer_id。
+type            = "signer"
+default_signer  = "${SAFE_SIGNER_ID}"            # 默认本节点扮演的 owner
+
+[rate_limit]
+permits_per_minute = 30                          # Safe Service 默认限流较紧
+
+# ──────────────────────────────────────────────────────────────────────
+# 能力（按风险分级）
+# ──────────────────────────────────────────────────────────────────────
+
+# 读类（Low）—— Safe 配置 / 待执行 tx / module / guard
+[[capabilities]]
+id          = "safe.config.read"
+description = "Read Safe owners, threshold, nonce, version, fallback handler"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "safe.tx.list_pending"
+description = "List pending Safe transactions awaiting more signatures or execution"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "safe.tx.read"
+description = "Fetch one Safe transaction by safeTxHash with all current confirmations"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "safe.module.list"
+description = "List installed Safe modules"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "safe.guard.read"
+description = "Read installed transaction guard (if any)"
+enabled     = true
+risk        = "Low"
+
+# 模拟类（Low / Medium）
+[[capabilities]]
+id          = "safe.tx.simulate"
+description = "Simulate a Safe transaction's underlying call (eth_call from Safe)"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "safe.tx.simulate.tenderly"
+description = "Simulate via Tenderly with full trace + state diff"
+enabled     = false                              # 需要 Tenderly 账号，按需启用
+risk        = "Low"
+
+# 写类（Medium / High / Critical）
+[[capabilities]]
+id                  = "safe.tx.propose"
+description         = "Submit a new Safe transaction to the Safe Transaction Service. Off-chain — no gas spent yet."
+enabled             = true
+risk                = "Medium"
+required_approvals  = 1
+input_caps          = { allowed_to_addresses = "${SAFE_ALLOWED_TO}", max_value_wei = "${SAFE_MAX_VALUE_WEI:-10000000000000000000}" }
+
+[[capabilities]]
+id                  = "safe.tx.sign"
+description         = "Add this owner's confirmation to a pending Safe transaction (off-chain signature)"
+enabled             = true
+risk                = "High"
+required_approvals  = 1
+
+[[capabilities]]
+id                  = "safe.tx.execute"
+description         = "Execute a fully-confirmed Safe transaction on-chain. Side effects start HERE."
+enabled             = true
+risk                = "Critical"
+required_approvals  = 1
+preconditions       = ["safe.tx.simulate"]      # execute 前强制 simulate 过
+
+[[capabilities]]
+id                  = "safe.tx.reject"
+description         = "Submit an empty replacement tx at the same nonce to invalidate a pending tx"
+enabled             = true
+risk                = "High"
+required_approvals  = 1
+
+# 配置类（Critical）—— 改 owner / threshold / module / guard 都是高风险
+[[capabilities]]
+id                  = "safe.owner.add"
+description         = "Add an owner; produces a Safe tx that itself goes through the propose/sign/execute pipeline"
+enabled             = true
+risk                = "Critical"
+required_approvals  = 2
+
+[[capabilities]]
+id                  = "safe.owner.remove"
+description         = "Remove an owner"
+enabled             = true
+risk                = "Critical"
+required_approvals  = 2
+
+[[capabilities]]
+id                  = "safe.threshold.change"
+description         = "Change signature threshold"
+enabled             = true
+risk                = "Critical"
+required_approvals  = 2
+
+[[capabilities]]
+id                  = "safe.module.enable"
+description         = "Install a new module (extreme risk — modules can bypass owner signatures)"
+enabled             = false                     # 默认关闭，按需启用 + 双审批
+risk                = "Critical"
+required_approvals  = 2
+
+# ──────────────────────────────────────────────────────────────────────
+# 高级
+# ──────────────────────────────────────────────────────────────────────
+[advanced]
+default_timeout_ms                  = 20000
+max_retries                         = 3
+require_simulation_before_execute   = true
+warn_if_signature_threshold_exceeds = 0.66       # 当签名数超过总 owner 的 66% 时打 warning event

@@ -1,3 +1,7 @@
+use crate::dispatch_interceptor::{
+    DispatchCtx, DispatchInterceptor, SandboxInjectionInterceptor, TruncationMetadataInterceptor,
+    WallClockInterceptor,
+};
 use crate::registry::ConnectorRegistry;
 use crate::runtime::{
     ContainerRuntime, ProcessRuntime, RuntimeMode, RuntimeSelector, RuntimeSelectorConfig,
@@ -103,6 +107,18 @@ pub struct CapabilityDispatcher {
     /// Maximum bytes the dispatcher allows in result.output before
     /// truncating (Process + Container modes only). Default 256 KiB.
     process_output_cap_bytes: usize,
+    /// Pre/post hooks invoked around every `connector.execute()` call.
+    /// Registered in declaration order; `before` runs in-order, `after`
+    /// runs in-order (no reverse stacking — we want stable observability).
+    ///
+    /// Default registration (via `new()`) includes:
+    /// - [`WallClockInterceptor`] (GAP-3 fix: Native timeout deadline)
+    /// - [`TruncationMetadataInterceptor`] (GAP-1 fix: structured truncation flag)
+    /// - [`SandboxInjectionInterceptor`] (GAP-2 hook: sandbox profile hint)
+    ///
+    /// Use [`Self::without_default_interceptors`] to opt out for tests or
+    /// alternate runtimes that want to register custom interceptors.
+    interceptors: Vec<Arc<dyn DispatchInterceptor>>,
 }
 
 impl CapabilityDispatcher {
@@ -131,7 +147,20 @@ impl CapabilityDispatcher {
             process_runtime: None,
             container_runtime: None,
             process_output_cap_bytes: DEFAULT_PROCESS_OUTPUT_CAP_BYTES,
+            interceptors: Self::default_interceptors(),
         }
+    }
+
+    /// Build the default interceptor stack registered by `new()` /
+    /// `with_runtime_config()`. The order matters: wall-clock first so the
+    /// deadline is set before any other `before` hook reads it, sandbox
+    /// hint second, truncation metadata last (it only mutates `after`).
+    fn default_interceptors() -> Vec<Arc<dyn DispatchInterceptor>> {
+        vec![
+            Arc::new(WallClockInterceptor::new()),
+            Arc::new(SandboxInjectionInterceptor::new()),
+            Arc::new(TruncationMetadataInterceptor::new()),
+        ]
     }
 
     /// Create a new capability dispatcher with custom runtime selector config
@@ -161,7 +190,22 @@ impl CapabilityDispatcher {
             process_runtime: None,
             container_runtime: None,
             process_output_cap_bytes: DEFAULT_PROCESS_OUTPUT_CAP_BYTES,
+            interceptors: Self::default_interceptors(),
         }
+    }
+
+    /// Register an additional [`DispatchInterceptor`] in the dispatcher chain.
+    /// Runs in addition to any default interceptors registered by `new()`.
+    pub fn with_interceptor(mut self, interceptor: Arc<dyn DispatchInterceptor>) -> Self {
+        self.interceptors.push(interceptor);
+        self
+    }
+
+    /// Drop the default interceptor stack. Useful when a test or alternate
+    /// runtime wants to register a custom set without inheriting the defaults.
+    pub fn without_default_interceptors(mut self) -> Self {
+        self.interceptors.clear();
+        self
     }
 
     /// Attach a Process runtime to enable RuntimeMode::Process dispatch for
@@ -438,6 +482,33 @@ impl CapabilityDispatcher {
             request.capability_id, capability_contract.risk, runtime_mode
         );
 
+        // GAP fix wave (1/2/3): run pre-dispatch interceptors. `before` may
+        // populate `dispatch_ctx.deadline` (WallClockInterceptor → GAP-3),
+        // `dispatch_ctx.sandbox_hint` (SandboxInjectionInterceptor → GAP-2),
+        // or short-circuit by returning Err. The DispatchCtx is rebuilt
+        // fresh per call so it can't leak state across requests.
+        let mut dispatch_ctx = DispatchCtx::new(request.clone(), capability_contract.clone());
+        for interceptor in &self.interceptors {
+            if let Err(e) = interceptor.before(&mut dispatch_ctx).await {
+                error!(
+                    "DispatchInterceptor.before failed for capability {}: {:?}",
+                    request.capability_id, e
+                );
+                return Ok(CapabilityExecutionResult {
+                    execution_id: request.execution_id.clone(),
+                    trace_id: request.trace_id.clone(),
+                    connector_id: request.connector_id.clone(),
+                    capability_id: request.capability_id.clone(),
+                    output: serde_json::json!({
+                        "error": format!("DispatchInterceptor rejected: {}", e)
+                    }),
+                    status: ExecutionStatus::Failed,
+                    error: Some(format!("DispatchInterceptor rejected: {}", e)),
+                    actual_runtime: None,
+                });
+            }
+        }
+
         // Check runtime availability and fail-fast for unconfigured runtimes
         match runtime_mode {
             RuntimeMode::Container => {
@@ -667,15 +738,35 @@ impl CapabilityDispatcher {
             }
         }
 
-        // Execute the capability. Native runs unwrapped; Process and Container
-        // wrap connector.execute() with a hard timeout + output cap and tag
-        // the result with the dispatched runtime for post-execute verification.
+        // Execute the capability.
+        //
+        // GAP-3 fix (2026-05-22): Native used to run UNWRAPPED — a hung
+        // browser/CDP shim could pin the dispatcher forever. We now wrap
+        // Native with `tokio::time::timeout(deadline)` where `deadline`
+        // comes from [`WallClockInterceptor`]. Process/Container still go
+        // through `execute_with_dispatch_budget` (same timeout math, plus
+        // output cap), so behaviour is now symmetric across runtimes.
         let exec_outcome: anyhow::Result<CapabilityExecutionResult> = match runtime_mode {
-            RuntimeMode::Native => connector.execute(request.clone()).await.map(|mut result| {
-                // HIGH #6 FIX: Set actual_runtime to enable post-execution verification.
-                result.actual_runtime = Some(RuntimeMode::Native);
-                result
-            }),
+            RuntimeMode::Native => {
+                let deadline_dur = dispatch_ctx
+                    .deadline
+                    .map(|d| d.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(|| {
+                        compute_dispatch_timeout(capability_contract.timeouts.request_ms)
+                    });
+                match tokio::time::timeout(deadline_dur, connector.execute(request.clone())).await {
+                    Ok(Ok(mut result)) => {
+                        // HIGH #6 FIX: Set actual_runtime to enable post-execution verification.
+                        result.actual_runtime = Some(RuntimeMode::Native);
+                        Ok(result)
+                    }
+                    Ok(Err(e)) => Err(anyhow::anyhow!("Connector execution failed: {}", e)),
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Native capability execution exceeded {:?} timeout",
+                        deadline_dur
+                    )),
+                }
+            }
             RuntimeMode::Process | RuntimeMode::Container => {
                 let timeout = compute_dispatch_timeout(capability_contract.timeouts.request_ms);
                 let cap_bytes = self.process_output_cap_bytes;
@@ -714,7 +805,16 @@ impl CapabilityDispatcher {
         };
 
         match exec_outcome {
-            Ok(result) => {
+            Ok(mut result) => {
+                // GAP fix wave: run post-dispatch interceptor `after` hooks.
+                // These may annotate `result.output` with structured metadata
+                // (e.g. TruncationMetadataInterceptor → GAP-1). They run
+                // BEFORE the runtime-mismatch check so even rejected results
+                // carry the same metadata schema (defence in depth).
+                for interceptor in &self.interceptors {
+                    interceptor.after(&dispatch_ctx, &mut result).await;
+                }
+
                 // HIGH #6 FIX: Verify actual runtime matches expected runtime
                 if let Some(actual) = result.actual_runtime {
                     if actual != runtime_mode {

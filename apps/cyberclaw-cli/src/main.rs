@@ -144,69 +144,44 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn show_system_status(state: &CliState) -> Result<()> {
-    use cyberclaw_core::manifests::PackageKind;
+#[derive(serde::Deserialize)]
+struct StatusResponse {
+    #[serde(default)]
+    agents: usize,
+    #[serde(default)]
+    skills: usize,
+    #[serde(default)]
+    connectors: usize,
+    #[serde(default)]
+    plugins: usize,
+    #[serde(default)]
+    capabilities: usize,
+    #[serde(default)]
+    node_id: String,
+}
+
+async fn show_system_status(_state: &CliState) -> Result<()> {
+    use http_client::{get_json, server_url};
 
     println!("=== CyberClaw Platform Status ===\n");
 
-    // 查询各类包的数量
-    let agents = state
-        .package_registry
-        .list(Some(PackageKind::Agent))
-        .await?;
-    let skills = state
-        .package_registry
-        .list(Some(PackageKind::Skill))
-        .await?;
-    let connectors = state
-        .package_registry
-        .list(Some(PackageKind::Connector))
-        .await?;
-
-    // 统计 capabilities
-    let all_capabilities = state.connector_registry.list_capabilities();
-    let total_capabilities = all_capabilities.len();
+    let server = server_url(None);
+    let status: StatusResponse = get_json(&server, "/api/v2/status").await.map_err(|e| {
+        anyhow::anyhow!(
+            "❌ Could not fetch platform status: {} (is the server running? \
+             check CYBERCLAW_SERVER, or run `cyberclaw chat` first to log in)",
+            e
+        )
+    })?;
 
     println!("Registered Packages:");
-    println!("  Agents:      {}", agents.len());
-    println!("  Skills:      {}", skills.len());
-    println!("  Connectors:  {}", connectors.len());
-    println!("  Capabilities: {}", total_capabilities);
+    println!("  Agents:       {}", status.agents);
+    println!("  Skills:       {}", status.skills);
+    println!("  Connectors:   {}", status.connectors);
+    println!("  Plugins:      {}", status.plugins);
+    println!("  Capabilities: {}", status.capabilities);
     println!();
-
-    if !agents.is_empty() {
-        println!("Agent Packages:");
-        for agent in agents.iter().take(5) {
-            println!("  - {} (v{})", agent.id, agent.latest_version);
-        }
-        if agents.len() > 5 {
-            println!("  ... and {} more", agents.len() - 5);
-        }
-        println!();
-    }
-
-    if !skills.is_empty() {
-        println!("Skill Packages:");
-        for skill in skills.iter().take(5) {
-            println!("  - {} (v{})", skill.id, skill.latest_version);
-        }
-        if skills.len() > 5 {
-            println!("  ... and {} more", skills.len() - 5);
-        }
-        println!();
-    }
-
-    if !connectors.is_empty() {
-        println!("Connector Packages:");
-        for connector in connectors.iter().take(5) {
-            println!("  - {} (v{})", connector.id, connector.latest_version);
-        }
-        if connectors.len() > 5 {
-            println!("  ... and {} more", connectors.len() - 5);
-        }
-        println!();
-    }
-
+    println!("Node ID:  {}", status.node_id);
     println!("Platform: Ready");
     println!("Use 'cyberclaw <resource> list' for detailed information.");
 

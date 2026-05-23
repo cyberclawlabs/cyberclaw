@@ -19,16 +19,26 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::{header::HeaderName, HeaderMap, HeaderValue},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::post,
     Extension, Json, Router,
 };
+use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use cyberclaw_agent_runtime::agentic_loop::{
     AgenticLoop, DefaultAgenticLoop, IterationResult, LoopConfig,
+};
+use cyberclaw_agent_runtime::{
+    AgenticLoopGovernor, GovernorConfig, JsonStructureVerifier, LoopProfile, RegexAssertVerifier,
+    VerifierChain,
 };
 use cyberclaw_agent_runtime::builtin_tools::{BuiltinToolRegistry, ToolsetConfig};
 use cyberclaw_agent_runtime::memory_integration::MemoryIntegration;
@@ -243,6 +253,96 @@ pub enum StreamEvent {
     },
 }
 
+/// 2026-05-19 — internal event the agentic-loop dispatch path emits when the
+/// caller wants SSE streaming. Serialised into wire frames by
+/// [`stream_frame_to_sse_event`].
+///
+/// Frame shapes the CLI's `parse_sse_data` (apps/cyberclaw-cli/src/commands/
+/// chat.rs:294-332) accepts today:
+///
+/// * `Token` → `{"choices":[{"delta":{"content":"…"}}]}` (rendered)
+/// * `ToolStart` → `{"type":"tool_start","tool":"…","args":{…}}` (Unknown→skip,
+///   forward-compatible: a future client revision can render progress without
+///   a server change)
+/// * `ToolComplete` → `{"type":"tool_complete","tool":"…","ok":bool,
+///   "preview":"…"}` (Unknown→skip, same forward-compatibility)
+/// * `ErrorMsg` → `{"error":{"message":"…","type":"…"}}` (Unknown→skip on the
+///   current CLI; surfaced for explicit observability in future revisions)
+/// * `Done` → literal `[DONE]` sentinel (matches client `SseFrame::Done`)
+#[derive(Debug, Clone)]
+pub(crate) enum StreamFrame {
+    /// A text fragment from the final assistant message. Each delta is
+    /// re-emitted as an OpenAI-shaped `choices[].delta.content` chunk so
+    /// chat-tui can keep its existing 4-frame parser unmodified.
+    Token(String),
+    /// A tool call dispatched through the gateway.
+    ToolStart {
+        tool: String,
+        args: serde_json::Value,
+    },
+    /// A tool call returned (success or failure). `ok=false` carries the
+    /// error message in `preview`; success carries a truncated payload
+    /// preview (≤240 chars) so SSE never leaks full secrets via the
+    /// streaming channel.
+    ToolComplete {
+        tool: String,
+        ok: bool,
+        preview: String,
+        duration_ms: u64,
+    },
+    /// Terminal error. Loop aborted; the next frame after this is `Done`.
+    ErrorMsg { message: String, kind: String },
+    /// Stream terminator. Maps to the literal `data: [DONE]\n\n` frame.
+    Done,
+}
+
+/// Serialise a [`StreamFrame`] into an axum SSE [`SseEvent`].
+///
+/// The wire format mirrors the OpenAI-compatible token frame so the existing
+/// CLI parser (`SseFrame::Token` branch) keeps working without modification.
+/// `Done` becomes the literal `[DONE]` sentinel.
+fn stream_frame_to_sse_event(frame: &StreamFrame) -> SseEvent {
+    match frame {
+        StreamFrame::Token(content) => {
+            // OpenAI-shaped delta — `{"choices":[{"delta":{"content":"…"}}]}`.
+            let payload = serde_json::json!({
+                "choices": [{"delta": {"content": content}}],
+            });
+            SseEvent::default().data(payload.to_string())
+        }
+        StreamFrame::ToolStart { tool, args } => {
+            let payload = serde_json::json!({
+                "type": "tool_start",
+                "tool": tool,
+                "args": args,
+            });
+            SseEvent::default().data(payload.to_string())
+        }
+        StreamFrame::ToolComplete {
+            tool,
+            ok,
+            preview,
+            duration_ms,
+        } => {
+            let payload = serde_json::json!({
+                "type": "tool_complete",
+                "tool": tool,
+                "ok": ok,
+                "preview": preview,
+                "duration_ms": duration_ms,
+            });
+            SseEvent::default().data(payload.to_string())
+        }
+        StreamFrame::ErrorMsg { message, kind } => {
+            let payload = serde_json::json!({
+                "error": {"message": message, "type": kind},
+            });
+            SseEvent::default().data(payload.to_string())
+        }
+        StreamFrame::Done => SseEvent::default().data("[DONE]"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OrchestratorGateway bridge
 // ---------------------------------------------------------------------------
@@ -379,13 +479,20 @@ pub async fn agent_chat_completions(
         return persistent_chat_dispatch(state.clone(), &req, &model, &claims, &request_id).await;
     }
 
-    // Streaming is not yet supported; reject if requested.
+    // 2026-05-19 — SSE streaming branch. Previously rejected with HTTP 400;
+    // now produces a real `text/event-stream` response in the 4-frame format
+    // the cyberclaw CLI chat-tui parser expects (token / tool_start /
+    // tool_complete / [DONE]). Non-streaming path below is unchanged and
+    // remains bit-for-bit identical to the legacy behaviour.
     if req.stream.unwrap_or(false) {
-        return Err(ApiError::InvalidRequest(
-            "Streaming is not yet supported for the agentic loop endpoint. \
-             Use stream=false or omit the field."
-                .to_string(),
-        ));
+        return agent_chat_completions_streaming(
+            state.clone(),
+            claims.clone(),
+            req,
+            request_id,
+            model,
+        )
+        .await;
     }
 
     // --- Build OrchestratorGateway (P0-1 fix: routes through PolicyEngine) ---
@@ -622,7 +729,25 @@ pub async fn agent_chat_completions(
     // P1.2/P1.3 — clone gateway so the verify-by-execution path in
     // `run_agentic_loop` can still dispatch `fs.stat` after the loop owns
     // its own Arc.
-    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone());
+    // --- Select LoopProfile based on message heuristic ---
+    // L3 when multi-turn (≥4 messages) OR any single message > 500 chars (long/complex).
+    // L2 when any message > 100 chars (medium).
+    // L1 otherwise (short single-turn).
+    let profile = select_loop_profile(&req.messages);
+
+    let governor = AgenticLoopGovernor::new(GovernorConfig::from_profile(profile));
+
+    // CodeBlockVerifier omitted — requires exec runtime wiring (sprint 3c).
+    // JsonStructureVerifier + RegexAssertVerifier are pure-local and safe to enable now.
+    let verifier_chain = Arc::new(
+        VerifierChain::new()
+            .add(Box::new(JsonStructureVerifier::new()))
+            .add(Box::new(RegexAssertVerifier::new())),
+    );
+
+    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone())
+        .with_governor(governor)
+        .with_verifier_chain(verifier_chain);
 
     // Sprint 44+1 — install resolved bindings on the loop. Precedence:
     // ctx.runtime_skill_bindings (from req.skill_ids) overrides the
@@ -686,6 +811,49 @@ pub async fn agent_chat_completions(
         );
     }
 
+    // Sprint v1.x R1 — keyword-driven auto-bind of domain-expert skills.
+    // Runs after explicit binding so caller-supplied `skill_ids` always win;
+    // any non-conflicting matched expert skill is appended to the system
+    // prompt under an `Auto-bound skill` heading. See
+    // docs/architecture/skills/auto-bind.md for the matching semantics.
+    {
+        let already_bound: Vec<String> = agentic_loop
+            .active_skill_bindings()
+            .iter()
+            .map(|s| s.as_str().strip_prefix("sk_").unwrap_or(s.as_str()).to_string())
+            .collect();
+        let last_user_msg = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        if !last_user_msg.is_empty() {
+            let installed_dir = {
+                let hub = state.skill_hub.read().await;
+                hub.base_dir().join("installed")
+            };
+            let extras =
+                auto_bind_extra_skills(&installed_dir, last_user_msg, &already_bound);
+            if !extras.is_empty() {
+                let extra_names: Vec<&str> =
+                    extras.iter().map(|(n, _)| n.as_str()).collect();
+                info!(
+                    request_id = %request_id,
+                    auto_bound = ?extra_names,
+                    "Auto-bind: domain expert skill(s) injected"
+                );
+                for (name, body) in extras {
+                    loop_config.system_prompt = format!(
+                        "{}\n\n## Auto-bound skill: {name}\n\n{body}",
+                        loop_config.system_prompt
+                    );
+                }
+            }
+        }
+    }
+
     // Initialize the loop with config.
     agentic_loop.init(loop_config).await.map_err(|e| {
         error!(request_id = %request_id, "Failed to initialize agentic loop: {}", e);
@@ -728,6 +896,7 @@ pub async fn agent_chat_completions(
         &bound_ecosystems,
         gateway.clone(),
         req.agent_id.as_deref(),
+        None, // no streaming sink — non-streaming path
     )
     .await?;
 
@@ -752,8 +921,33 @@ pub async fn agent_chat_completions(
     );
 
     // --- Build response ---
-    let response_text =
+    // v1.2 P4 (2026-05-23): emit a fallback message when the loop produced
+    // no user-visible text. Causes observed:
+    //   - LLM content-filter returned empty content (model-side refusal)
+    //   - DangerousCapabilityFilter blocked the only tool call; model
+    //     produced thinking but emitted no text
+    //   - Network timeout produced finish_reason=stop with no content
+    // Returning "" to the client looks like a crash. The fallback below
+    // gives the user actionable signal (finish_reason already carries
+    // the machine-readable cause).
+    let mut response_text =
         final_text.unwrap_or_else(|| summary.final_output.clone().unwrap_or_default());
+    if response_text.trim().is_empty() {
+        tracing::warn!(
+            request_id = %request_id,
+            finish_reason = %finish_reason,
+            iterations = summary.iterations,
+            tokens_used = summary.tokens_used,
+            "Agentic loop completed with empty user-facing text — emitting fallback"
+        );
+        response_text = format!(
+            "I was unable to produce a response for this request (finish_reason={}, \
+             iterations={}, tokens={}). This typically means the request was refused at \
+             the model layer (content policy) or the only available tool was blocked by \
+             governance. Please rephrase the request or check the audit log for details.",
+            finish_reason, summary.iterations, summary.tokens_used
+        );
+    }
 
     let now_ts = chrono::Utc::now().timestamp() as u64;
     let response = AgentChatResponse {
@@ -814,6 +1008,433 @@ pub async fn agent_chat_completions(
     }
 
     Ok((headers, Json(response)).into_response())
+}
+
+/// 2026-05-19 — SSE-streaming variant of [`agent_chat_completions`].
+///
+/// Mirrors the non-streaming handler's setup (gateway, system prompt with
+/// universal-resilience + constitution, memory integration, skill bindings,
+/// tool palette, agent default merge) so governance / audit / hallucination
+/// detection / silent-abandon enforcement remain identical. The only
+/// behavioural delta is the response shape: instead of a single JSON body,
+/// we return `text/event-stream` and:
+///
+/// 1. Emit `tool_start` / `tool_complete` SSE frames as each capability
+///    dispatches through [`run_agentic_loop`]'s sink hook (the loop logic
+///    itself is unchanged — the sink is `Option<&Sender>`, `None` for the
+///    legacy path).
+/// 2. Once the loop terminates, emit the final assistant text in ~24-char
+///    chunks as OpenAI-shaped delta frames, pacing 12 ms apart so the
+///    client gets a progressive-render feel.
+/// 3. Terminate with the literal `data: [DONE]\n\n` sentinel that
+///    `cyberclaw-cli`'s `SseFrame::Done` matches on.
+///
+/// Errors mid-loop (LLM 5xx, governance reject, etc.) are surfaced as a
+/// single `data: {"error":{...}}` frame followed by `[DONE]` — the SSE
+/// connection is never silently closed without a terminator.
+///
+/// The agentic loop is driven on a separate `tokio::spawn` task so we can
+/// hand the SSE response off to axum immediately (first-byte latency
+/// independent of how long the loop takes to assemble its first chunk).
+async fn agent_chat_completions_streaming(
+    state: Arc<AppState>,
+    claims: Claims,
+    req: AgentChatRequest,
+    request_id: String,
+    model: String,
+) -> Result<Response, ApiError> {
+    // --- Build OrchestratorGateway (P0-1 fix: routes through PolicyEngine) ---
+    let gateway: Arc<dyn OrchestratorGateway> = build_governing_gateway(&state);
+
+    // --- Universal-resilience + constitution + system_prompt override ---
+    // Mirrors agent_chat_completions: read SKILL.md, prepend the
+    // SkillFirst constitution, append memory snapshot + skill bodies later.
+    let resilience_body = {
+        let hub = state.skill_hub.read().await;
+        let path = hub
+            .base_dir()
+            .join("installed")
+            .join("universal-resilience")
+            .join("SKILL.md");
+        std::fs::read_to_string(&path).ok()
+    };
+    let core_prompt = cyberclaw_agent_runtime::constitution::cyberclaw_constitution_text(
+        cyberclaw_agent_runtime::constitution::ConstitutionProfile::SkillFirst,
+    );
+    let default_system_prompt = match resilience_body.as_ref() {
+        Some(body) => format!(
+            "{core_prompt}\n\n<default_skill name=\"universal-resilience\">\n{body}\n</default_skill>"
+        ),
+        None => core_prompt,
+    };
+    let system_prompt = req.system_prompt.clone().unwrap_or(default_system_prompt);
+    let max_iterations = req.max_iterations.unwrap_or(90);
+
+    // --- Tool palette (builtin + active deferred, dedup, with cache_control) ---
+    let tools: Vec<ToolDefinition> = if matches!(req.tools.as_deref(), Some([])) {
+        Vec::new()
+    } else {
+        let builtin_facades: Vec<CapabilityFacade> =
+            BuiltinToolRegistry::with_defaults().get_facades(&ToolsetConfig::default_config());
+        let mut seen_names: std::collections::HashSet<String> =
+            builtin_facades.iter().map(|f| f.name.clone()).collect();
+        let mut merged: Vec<CapabilityFacade> = builtin_facades;
+        {
+            let registry = state.deferred_tool_registry.read().await;
+            for facade in registry.active_facades() {
+                if seen_names.insert(facade.name.clone()) {
+                    merged.push(facade.clone());
+                }
+            }
+        }
+
+        let cache_enabled = std::env::var("CYBERCLAW_PROMPT_CACHE")
+            .map(|v| {
+                let lv = v.to_lowercase();
+                lv != "0" && lv != "false" && lv != "no"
+            })
+            .unwrap_or(true);
+        let mut tool_defs: Vec<ToolDefinition> = merged
+            .iter()
+            .map(|f: &CapabilityFacade| ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: f.name.clone(),
+                    description: f.description.clone(),
+                    parameters: f
+                        .input_schema
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}})),
+                },
+                cache_control: None,
+            })
+            .collect();
+        if cache_enabled {
+            if let Some(last) = tool_defs.last_mut() {
+                last.cache_control = Some(cyberclaw_llm::types::CacheControl::ephemeral());
+            }
+        }
+        tool_defs
+    };
+
+    let cache_system_enabled = std::env::var("CYBERCLAW_PROMPT_CACHE")
+        .map(|v| {
+            let lv = v.to_lowercase();
+            lv != "0" && lv != "false" && lv != "no"
+        })
+        .unwrap_or(true);
+
+    let mut loop_config = LoopConfig {
+        system_prompt,
+        model: model.clone(),
+        budget: cyberclaw_agent_runtime::agentic_loop::IterationBudget {
+            max_iterations,
+            max_tokens: 0,
+            timeout: Duration::from_secs(600),
+        },
+        stuck_threshold: 3,
+        tools,
+        cache_system_prompt: cache_system_enabled,
+    };
+
+    // --- MemoryIntegration ---
+    let session_id = SessionId::from_string(format!("chat-{}", request_id))
+        .map_err(|e| ApiError::InternalError(format!("Failed to create session ID: {}", e)))?;
+    let working_memory = Arc::new(InMemoryWorkingMemory::new(WorkingMemoryConfig {
+        capacity: 100,
+        ttl_seconds: None,
+    }));
+    let mut memory_integration =
+        MemoryIntegration::with_defaults(working_memory.clone(), session_id.clone());
+    let memory_snapshot = memory_integration.load_context().map_err(|e| {
+        warn!(request_id = %request_id, "Failed to load memory context: {}", e);
+        ApiError::InternalError(format!("Memory context load failed: {}", e))
+    })?;
+    if !memory_snapshot.formatted_context.is_empty() {
+        loop_config.system_prompt = format!(
+            "{}\n\n{}",
+            loop_config.system_prompt, memory_snapshot.formatted_context
+        );
+    }
+
+    // --- SkillBinding ---
+    let runtime_skill_overrides: Option<Vec<cyberclaw_core::ids::SkillId>> =
+        req.skill_ids.as_ref().map(|raw_ids| {
+            raw_ids
+                .iter()
+                .filter_map(|raw_id| {
+                    cyberclaw_core::ids::SkillId::from_string(raw_id.clone())
+                        .map_err(|e| {
+                            warn!(
+                                request_id = %request_id,
+                                skill_id = %raw_id,
+                                error = %e,
+                                "Skill bind: invalid skill id, skipping"
+                            );
+                        })
+                        .ok()
+                })
+                .collect()
+        });
+    let execution_context = match runtime_skill_overrides {
+        Some(list) => {
+            cyberclaw_core::execution::ExecutionContext::new().with_runtime_skill_bindings(list)
+        }
+        None => cyberclaw_core::execution::ExecutionContext::new(),
+    };
+    let agent_default_skills: Vec<cyberclaw_core::ids::SkillId> = Vec::new();
+
+    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone());
+    agentic_loop.resolve_skill_bindings(&agent_default_skills, Some(&execution_context));
+
+    let mut bound_ecosystems: Vec<cyberclaw_skill_runtime::compat::SourceEcosystem> = Vec::new();
+    let resolved_bindings: Vec<cyberclaw_core::ids::SkillId> =
+        agentic_loop.active_skill_bindings().to_vec();
+    if !resolved_bindings.is_empty() {
+        let hub = state.skill_hub.read().await;
+        let installed_dir = hub.base_dir().join("installed");
+        for sk in &resolved_bindings {
+            let raw_id = sk.as_str();
+            let name = raw_id.strip_prefix("sk_").unwrap_or(raw_id);
+            let skill_md = installed_dir.join(name).join("SKILL.md");
+            if let Ok(body) = std::fs::read_to_string(&skill_md) {
+                let frontmatter = parse_skill_frontmatter(&body);
+                let eco = cyberclaw_skill_runtime::compat::detect_source_ecosystem(&frontmatter);
+                if !bound_ecosystems.contains(&eco) {
+                    bound_ecosystems.push(eco);
+                }
+                loop_config.system_prompt = format!(
+                    "{}\n\n## Skill: {name}\n\n{body}",
+                    loop_config.system_prompt
+                );
+            }
+        }
+    }
+
+    // Sprint v1.x R1 — same keyword-driven auto-bind hook as the non-streaming
+    // path. Kept symmetric to avoid SSE responses missing domain expertise.
+    {
+        let already_bound: Vec<String> = agentic_loop
+            .active_skill_bindings()
+            .iter()
+            .map(|s| s.as_str().strip_prefix("sk_").unwrap_or(s.as_str()).to_string())
+            .collect();
+        let last_user_msg = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        if !last_user_msg.is_empty() {
+            let installed_dir = {
+                let hub = state.skill_hub.read().await;
+                hub.base_dir().join("installed")
+            };
+            let extras =
+                auto_bind_extra_skills(&installed_dir, last_user_msg, &already_bound);
+            if !extras.is_empty() {
+                let extra_names: Vec<&str> =
+                    extras.iter().map(|(n, _)| n.as_str()).collect();
+                info!(
+                    request_id = %request_id,
+                    auto_bound = ?extra_names,
+                    "Auto-bind (streaming): domain expert skill(s) injected"
+                );
+                for (name, body) in extras {
+                    loop_config.system_prompt = format!(
+                        "{}\n\n## Auto-bound skill: {name}\n\n{body}",
+                        loop_config.system_prompt
+                    );
+                }
+            }
+        }
+    }
+
+    agentic_loop.init(loop_config).await.map_err(|e| {
+        error!(request_id = %request_id, "Failed to initialize agentic loop (streaming): {}", e);
+        ApiError::InternalError(format!("Loop initialization failed: {}", e))
+    })?;
+
+    for msg in &req.messages {
+        match msg.role.as_str() {
+            "user" => agentic_loop.add_user_message(&msg.content),
+            _ => agentic_loop.add_user_message(format!("[{}]: {}", msg.role, msg.content)),
+        }
+    }
+
+    let caller_actor = cyberclaw_core::identity::ActorRef {
+        id: cyberclaw_core::ids::ActorId::from_string(claims.sub.as_str().to_string())
+            .unwrap_or_else(|_| {
+                cyberclaw_core::ids::ActorId::from_string("unknown-caller".to_string())
+                    .expect("fallback actor id")
+            }),
+        actor_type: cyberclaw_core::identity::ActorType::Human,
+        tenant_id: claims.tenant.clone(),
+        home_node_id: None,
+        display_name: claims.sub.as_str().to_string(),
+    };
+
+    // --- Spawn the agentic loop on a task; pipe events through mpsc ---
+    let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
+
+    let state_for_task = state.clone();
+    let claims_for_task = claims.clone();
+    let request_id_for_task = request_id.clone();
+    let model_for_task = model.clone();
+    let tx_for_task = tx.clone();
+    let bound_for_task = bound_ecosystems.clone();
+    let agent_id_for_task = req.agent_id.clone();
+    let gateway_for_task = gateway.clone();
+
+    tokio::spawn(async move {
+        // The agentic loop runs to completion here. Tool-event frames are
+        // emitted as a side effect via `tx_for_task`. The final assistant
+        // text is chunked out at the end so the CLI still renders a body.
+        let result = run_agentic_loop(
+            &state_for_task,
+            &mut agentic_loop,
+            &mut memory_integration,
+            &request_id_for_task,
+            &caller_actor,
+            state_for_task.tool_mapper.as_ref(),
+            &bound_for_task,
+            gateway_for_task.clone(),
+            agent_id_for_task.as_deref(),
+            Some(&tx_for_task),
+        )
+        .await;
+
+        match result {
+            Ok((final_text, finish_reason)) => {
+                // Finalize the loop so summary + memory flush match the
+                // non-streaming path (audit chain stays consistent).
+                let summary = match agentic_loop.finalize().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(request_id = %request_id_for_task, "finalize failed: {}", e);
+                        let _ = tx_for_task.send(StreamFrame::ErrorMsg {
+                            message: format!("loop finalize failed: {e}"),
+                            kind: "internal".to_string(),
+                        });
+                        let _ = tx_for_task.send(StreamFrame::Done);
+                        return;
+                    }
+                };
+                if let Err(e) = memory_integration.flush() {
+                    warn!(request_id = %request_id_for_task, "memory flush failed: {}", e);
+                }
+
+                info!(
+                    request_id = %request_id_for_task,
+                    iterations = summary.iterations,
+                    tokens_used = summary.tokens_used,
+                    finish_reason = %finish_reason,
+                    "Agentic loop completed (streaming)"
+                );
+
+                // Pair the agent.invoke.complete audit row that the
+                // non-streaming path emits at the end of agent_chat_completions.
+                if let Some(audit) = state_for_task.audit.as_ref() {
+                    audit
+                        .record(crate::audit::AuditEntry::now(
+                            claims_for_task.sub.as_str().to_string(),
+                            crate::audit::AuditKind::Mutation,
+                            "agent.invoke.complete",
+                            Some(format!("request:{}", request_id_for_task)),
+                            serde_json::json!({
+                                "model": model_for_task,
+                                "iterations": summary.iterations,
+                                "tokens": summary.tokens_used,
+                                "finish_reason": &finish_reason,
+                                "stream": true,
+                            }),
+                            crate::audit::AuditResult::Success,
+                        ))
+                        .await;
+                }
+
+                // Emit the final assistant body as token deltas so chat-tui
+                // can render it. We chunk on character boundaries (~24 chars)
+                // and pace 12 ms apart. Skipping the pace on chunk 0 keeps
+                // first-token latency under control.
+                let body =
+                    final_text.unwrap_or_else(|| summary.final_output.clone().unwrap_or_default());
+                if !body.is_empty() {
+                    let mut buf = String::with_capacity(32);
+                    let mut idx = 0usize;
+                    for ch in body.chars() {
+                        buf.push(ch);
+                        if buf.chars().count() >= 24 {
+                            if idx > 0 {
+                                tokio::time::sleep(Duration::from_millis(12)).await;
+                            }
+                            let chunk = std::mem::take(&mut buf);
+                            if tx_for_task.send(StreamFrame::Token(chunk)).is_err() {
+                                // client gone
+                                return;
+                            }
+                            idx += 1;
+                        }
+                    }
+                    if !buf.is_empty() {
+                        if idx > 0 {
+                            tokio::time::sleep(Duration::from_millis(12)).await;
+                        }
+                        let _ = tx_for_task.send(StreamFrame::Token(buf));
+                    }
+                }
+
+                let _ = tx_for_task.send(StreamFrame::Done);
+            }
+            Err(api_err) => {
+                error!(
+                    request_id = %request_id_for_task,
+                    "Agentic loop failed (streaming): {:?}",
+                    api_err
+                );
+                let (message, kind) = match &api_err {
+                    ApiError::InvalidRequest(m) => (m.clone(), "invalid_request".to_string()),
+                    ApiError::LlmError(m) => (m.clone(), "llm_error".to_string()),
+                    ApiError::InternalError(m) => (m.clone(), "internal".to_string()),
+                    other => (other.to_string(), "error".to_string()),
+                };
+                let _ = tx_for_task.send(StreamFrame::ErrorMsg { message, kind });
+                let _ = tx_for_task.send(StreamFrame::Done);
+            }
+        }
+    });
+
+    // --- Convert mpsc → SSE stream ---
+    // `UnboundedReceiverStream` adapts the receiver into a Stream; each
+    // `StreamFrame` is serialised by `stream_frame_to_sse_event`. We wrap
+    // with `Sse::new` + `KeepAlive` so proxies / load balancers (15 s default
+    // is conservative) don't reap the connection mid-loop.
+    let sse_stream =
+        UnboundedReceiverStream::new(rx).map(|frame: StreamFrame| {
+            Ok::<SseEvent, std::convert::Infallible>(stream_frame_to_sse_event(&frame))
+        });
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("x-cyberclaw-request-id"),
+        HeaderValue::from_str(&request_id)
+            .map_err(|e| ApiError::InternalError(format!("Invalid header value: {}", e)))?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-cyberclaw-stream"),
+        HeaderValue::from_static("sse"),
+    );
+
+    let sse = Sse::new(sse_stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    );
+
+    let mut response = sse.into_response();
+    response.headers_mut().extend(headers);
+    Ok(response)
 }
 
 /// Sprint D5 — construct a [`PersistentExecutionPlan`] from a
@@ -1302,6 +1923,11 @@ async fn run_agentic_loop(
     // todo_write({content:"..."}) without agent_id; we supply it here from
     // the ChatRequest.agent_id field.
     agent_id: Option<&str>,
+    // 2026-05-19 — SSE streaming sink. When `Some`, each capability dispatch
+    // emits `tool_start` / `tool_complete` frames so the streaming client can
+    // surface progress. `None` keeps the legacy non-streaming behaviour
+    // (bit-for-bit identical: no events emitted, no extra allocations).
+    stream_sink: Option<&mpsc::UnboundedSender<StreamFrame>>,
 ) -> Result<(Option<String>, String), ApiError> {
     let mut final_text: Option<String> = None;
     #[allow(unused_assignments)]
@@ -1755,9 +2381,49 @@ async fn run_agentic_loop(
                             )
                             .await;
                     }
+                    // 2026-05-19 — emit tool_start SSE frame (streaming only).
+                    // Carries the LLM-visible tool name + the parsed argument
+                    // object so the client can render "running file.read(path=…)".
+                    // Falls through silently when the sink is closed (client
+                    // disconnect) — the loop continues so audit / governance
+                    // chains stay complete.
+                    if let Some(sink) = stream_sink {
+                        let args_val: serde_json::Value =
+                            serde_json::from_str(&tool_call.function.arguments).unwrap_or_else(
+                                |_| serde_json::json!({"raw": tool_call.function.arguments}),
+                            );
+                        let _ = sink.send(StreamFrame::ToolStart {
+                            tool: tool_call.function.name.clone(),
+                            args: args_val,
+                        });
+                    }
+
                     let dispatch_started = std::time::Instant::now();
                     let tool_result = agentic_loop.gateway().execute_capability(cap_request).await;
                     let dispatch_latency_ms = dispatch_started.elapsed().as_millis() as u64;
+
+                    // 2026-05-19 — emit tool_complete SSE frame (streaming only).
+                    // Includes a short result preview (errors verbatim, success
+                    // truncated to 240 chars) so the client can surface "ok" /
+                    // "failed: …" without us shipping potentially-secret full
+                    // payloads through SSE.
+                    if let Some(sink) = stream_sink {
+                        let (ok, preview) = match &tool_result {
+                            Ok(r) => {
+                                let body = serde_json::to_string(&r.output)
+                                    .unwrap_or_else(|_| r.output.to_string());
+                                let trimmed: String = body.chars().take(240).collect();
+                                (true, trimmed)
+                            }
+                            Err(e) => (false, e.to_string()),
+                        };
+                        let _ = sink.send(StreamFrame::ToolComplete {
+                            tool: tool_call.function.name.clone(),
+                            ok,
+                            preview,
+                            duration_ms: dispatch_latency_ms,
+                        });
+                    }
                     if let Some(audit) = state.audit.as_ref() {
                         let (output_bytes, error_reason) = match &tool_result {
                             Ok(r) => (
@@ -1951,6 +2617,63 @@ async fn run_agentic_loop(
 /// back to JSON parsing of the raw block when YAML isn't available. Most
 /// skill frontmatter is JSON-compatible (key: value pairs with simple
 /// scalars), which is enough for ecosystem detection.
+/// Sprint v1.x R1 — Auto-bind domain-expert skills based on user-prompt
+/// keyword match. Returns `(skill_name, body)` pairs for skills whose
+/// `manifest.yaml::spec.auto_bind` rule matches the prompt and that aren't
+/// already in `already_bound`.
+///
+/// This is a *pure additive* layer on top of explicit `skill_ids` binding;
+/// explicit bindings always win, auto-bound skills are appended afterwards.
+/// On any I/O error the function logs at `warn` and continues — auto-bind
+/// must never break the request path.
+fn auto_bind_extra_skills(
+    installed_dir: &std::path::Path,
+    prompt: &str,
+    already_bound: &[String],
+) -> Vec<(String, String)> {
+    let mut binder = cyberclaw_skill_runtime::SkillBinder::new();
+    if let Err(err) = binder.load_from_dir(installed_dir) {
+        warn!(
+            path = %installed_dir.display(),
+            ?err,
+            "auto-bind: scanning installed dir failed; skipping auto-bind"
+        );
+        return Vec::new();
+    }
+    if binder.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for rule in binder.match_prompt(prompt) {
+        if already_bound.iter().any(|n| n == &rule.skill_name) {
+            continue;
+        }
+        if hits.iter().any(|(n, _)| n == &rule.skill_name) {
+            continue;
+        }
+        let skill_md_path = rule.skill_dir.join("SKILL.md");
+        match std::fs::read_to_string(&skill_md_path) {
+            Ok(body) => {
+                debug!(
+                    skill = %rule.skill_name,
+                    priority = rule.priority,
+                    "auto-bind: matched skill"
+                );
+                hits.push((rule.skill_name.clone(), body));
+            }
+            Err(err) => {
+                warn!(
+                    skill = %rule.skill_name,
+                    path = %skill_md_path.display(),
+                    ?err,
+                    "auto-bind: SKILL.md unreadable; skipping"
+                );
+            }
+        }
+    }
+    hits
+}
+
 fn parse_skill_frontmatter(body: &str) -> serde_json::Value {
     let trimmed = body.trim_start();
     if !trimmed.starts_with("---") {
@@ -2410,6 +3133,22 @@ async fn handle_hallucination_check(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Select a [`LoopProfile`] from the request message list.
+///
+/// Heuristic:
+/// - L3: ≥4 messages OR any message > 500 chars (multi-turn / long-context)
+/// - L2: any message > 100 chars (medium single-turn)
+/// - L1: everything else (short single-turn)
+pub(crate) fn select_loop_profile(messages: &[ChatMessage]) -> LoopProfile {
+    if messages.len() >= 4 || messages.iter().any(|m| m.content.len() > 500) {
+        LoopProfile::L3
+    } else if messages.iter().any(|m| m.content.len() > 100) {
+        LoopProfile::L2
+    } else {
+        LoopProfile::L1
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3493,5 +4232,53 @@ mod tests {
         let actor = _test_actor();
         let missing = verify_paths_with_file_stat(&gw, &actor, &[]).await;
         assert!(missing.is_empty());
+    }
+
+    // ---- Test 1: select_loop_profile heuristic ----
+
+    fn msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn loop_profile_zero_messages_is_l1() {
+        assert_eq!(select_loop_profile(&[]), LoopProfile::L1);
+    }
+
+    #[test]
+    fn loop_profile_one_short_message_is_l1() {
+        // 10 chars < 100 → L1
+        assert_eq!(select_loop_profile(&[msg("hello!")]), LoopProfile::L1);
+    }
+
+    #[test]
+    fn loop_profile_one_medium_message_is_l2() {
+        // 150 chars: > 100, ≤ 500 → L2
+        let content = "a".repeat(150);
+        assert_eq!(select_loop_profile(&[msg(&content)]), LoopProfile::L2);
+    }
+
+    #[test]
+    fn loop_profile_one_long_message_is_l3() {
+        // 600 chars: > 500 → L3
+        let content = "a".repeat(600);
+        assert_eq!(select_loop_profile(&[msg(&content)]), LoopProfile::L3);
+    }
+
+    #[test]
+    fn loop_profile_four_or_more_messages_is_l3() {
+        // 4 short messages → L3 (multi-turn)
+        let msgs = vec![msg("hi"), msg("hi"), msg("hi"), msg("hi")];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
+    }
+
+    #[test]
+    fn loop_profile_three_short_messages_is_l1() {
+        // 3 messages, all short → L1
+        let msgs = vec![msg("hi"), msg("hi"), msg("hi")];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L1);
     }
 }

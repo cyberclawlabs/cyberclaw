@@ -44,11 +44,18 @@ This crate implements the runtime layer that powers Agent execution in CyberClaw
 | `loop_delegate` | `LoopDelegate` trait — `AutopilotDelegate`, `InteractiveDelegate`, `NoOpDelegate` |
 | `streaming` | `StreamSink` trait, `ChannelStreamSink` — streaming output support |
 
+### Loop Governance & Verification
+
+| Module | Description |
+|--------|-------------|
+| `loop_governor` | `AgenticLoopGovernor` — wall-clock / token / repetition gates with L1/L2/L3 enforcement profiles |
+| `verify` | `OutputVerifier` trait + `VerifierChain` + 3 built-in verifiers: `CodeBlockVerifier`, `JsonStructureVerifier`, `RegexAssertVerifier` |
+
 ### Skill Integration
 
 | Module | Description |
 |--------|-------------|
-| `skill_binder` | `SkillBinder` — binds Skill contexts into the agentic loop |
+| `skill_binder` | `SkillBinder` — auto-bind skills by AND-of-OR keyword group matching; a skill is bound when all keyword groups each have at least one match in the agent context |
 
 ## Architecture
 
@@ -78,6 +85,7 @@ MemoryIntegration
 - **CapabilityFacade is NOT a first-class object** — it is a read-only projection for LLM consumption. The canonical execution path is always `Connector -> Capability`.
 - **SubAgentOrchestrator** enforces depth limits and budget fractions to prevent unbounded recursion.
 - **ContextCompressor** uses a circuit breaker that trips after repeated compression failures.
+- **GAP-4 fix (2026-05-23)**: `agentic_loop` now detects whitespace-only assistant content paired with a `stop` finish reason. Previously this was silently treated as `Done`, causing the loop to terminate without a real response. It now injects a system nudge and continues the loop (`commit 69c1226`).
 - **Known debt**: `ChannelStreamSink::close()` is a no-op (relies on drop); `AgenticLoopPool::checkout` uses 10ms sleep busy-wait (should use Semaphore).
 
 ## Testing

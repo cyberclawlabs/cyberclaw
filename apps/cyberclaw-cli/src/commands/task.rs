@@ -1,20 +1,24 @@
-//! Task 管理命令
+//! Task management commands.
+//!
+//! All subcommands talk to the server (`/api/v1/tasks*`) — there is no
+//! local task registry. The previous in-process `TaskManager` only ever
+//! held data for a single CLI invocation (`task create` wrote to memory,
+//! `task list` in a fresh process saw an empty registry); that
+//! dead-end pattern was removed alongside the package-registry refactor.
 
 use crate::cli_state::CliState;
+use crate::http_client::{get_json, post_json, server_url};
 use crate::output::OutputFormat;
-use chrono::Utc;
 use clap::{Args, Subcommand};
-use cyberclaw_core::identity::ActorType;
-use cyberclaw_core::ids::{ActorId, TaskId};
-use cyberclaw_core::prelude::*;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
-    /// 创建新任务
+    /// 创建新任务（POST /api/v1/tasks）
     Create(TaskCreateArgs),
-    /// 列出所有任务
+    /// 列出任务（GET /api/v1/tasks）
     List(TaskListArgs),
-    /// 查看任务详情
+    /// 查看任务详情（GET /api/v1/tasks/:id）
     Get(TaskGetArgs),
 }
 
@@ -23,26 +27,25 @@ pub struct TaskCreateArgs {
     /// 任务标题
     #[arg(short, long)]
     pub title: String,
-
     /// 任务摘要
     #[arg(short, long)]
     pub summary: String,
-
-    /// 任务类型
+    /// 任务类型（analysis / investigation / review / execution / reporting / automation / custom:<name>）
     #[arg(short, long, default_value = "analysis")]
     pub kind: String,
-
-    /// 优先级
+    /// 优先级（critical / high / medium / low）
     #[arg(short, long, default_value = "medium")]
     pub priority: String,
-
-    /// 请求者名称
-    #[arg(short = 'u', long, default_value = "cli-user")]
-    pub requested_by: String,
+    /// 标签（逗号分隔，可重复 --label）
+    #[arg(long, value_delimiter = ',')]
+    pub label: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct TaskListArgs {
+    /// 过滤状态：pending / running / completed / failed / cancelled
+    #[arg(long)]
+    pub status: Option<String>,
     /// 输出格式
     #[arg(short, long, value_enum, default_value = "text")]
     pub format: OutputFormat,
@@ -50,86 +53,173 @@ pub struct TaskListArgs {
 
 #[derive(Debug, Args)]
 pub struct TaskGetArgs {
-    /// 任务 ID
+    /// 任务 ID（task-<uuid>）
     pub task_id: String,
-
     /// 输出格式
     #[arg(short, long, value_enum, default_value = "text")]
     pub format: OutputFormat,
 }
 
-pub async fn handle_task_command(cmd: TaskCommand, state: &CliState) -> anyhow::Result<()> {
+#[derive(Debug, Serialize)]
+struct CreateTaskBody {
+    title: String,
+    summary: String,
+    kind: serde_json::Value,
+    priority: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels: Vec<String>,
+}
+
+/// Server's TaskResponse is rich (admin/audit fields), but the CLI only
+/// needs the visible columns. Borrow what we use and let serde drop the
+/// rest. Falling back to `serde_json::Value` keeps the contract surface
+/// minimal so a TaskResponse field rename on the server doesn't break the
+/// CLI build.
+#[derive(Debug, Deserialize)]
+struct TaskSummaryView {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    kind: Option<serde_json::Value>,
+    #[serde(default)]
+    priority: Option<serde_json::Value>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    requested_by: Option<serde_json::Value>,
+}
+
+pub async fn handle_task_command(cmd: TaskCommand, _state: &CliState) -> anyhow::Result<()> {
     match cmd {
-        TaskCommand::Create(args) => handle_create(args, state).await,
-        TaskCommand::List(args) => handle_list(args, state).await,
-        TaskCommand::Get(args) => handle_get(args, state).await,
+        TaskCommand::Create(args) => handle_create(args).await,
+        TaskCommand::List(args) => handle_list(args).await,
+        TaskCommand::Get(args) => handle_get(args).await,
     }
 }
 
-async fn handle_create(args: TaskCreateArgs, state: &CliState) -> anyhow::Result<()> {
-    // 解析 TaskKind
-    let kind = match args.kind.to_lowercase().as_str() {
-        "analysis" => TaskKind::Analysis,
-        "investigation" => TaskKind::Investigation,
-        "review" => TaskKind::Review,
-        "execution" => TaskKind::Execution,
-        "reporting" => TaskKind::Reporting,
-        "automation" => TaskKind::Automation,
-        _ => anyhow::bail!("invalid task kind: {}. valid values: analysis, investigation, review, execution, reporting, automation", args.kind),
-    };
+fn friendly_task_error(e: &anyhow::Error) -> String {
+    let msg = e.to_string();
+    if msg.contains("401") || msg.contains("403") {
+        format!(
+            "{} (token expired? mint a fresh one via `curl -s -X POST \
+             $CYBERCLAW_SERVER/admin/login -H 'Content-Type: application/json' \
+             -d '{{\"user_id\":\"qa-admin\"}}' | jq -r .jwt > ~/.cyberclaw/cli-token`)",
+            msg
+        )
+    } else if msg.contains("connection refused") || msg.contains("connect error") {
+        format!("{} (is the server running? check CYBERCLAW_SERVER)", msg)
+    } else {
+        msg
+    }
+}
 
-    // 解析 Priority
-    let priority = match args.priority.to_lowercase().as_str() {
-        "critical" => Priority::Critical,
-        "high" => Priority::High,
-        "medium" => Priority::Medium,
-        "low" => Priority::Low,
-        _ => anyhow::bail!("invalid priority: {}", args.priority),
-    };
+fn parse_kind_for_server(raw: &str) -> serde_json::Value {
+    // Server's TaskKind enum is serde-tagged; "custom" uses {"Custom": "<name>"},
+    // canonical kinds are bare strings (e.g. "Analysis"). Accept lowercase
+    // input and map to the canonical capitalised form the server expects.
+    let lower = raw.to_lowercase();
+    if let Some(custom) = lower.strip_prefix("custom:") {
+        serde_json::json!({ "Custom": custom })
+    } else {
+        let capitalised = match lower.as_str() {
+            "analysis" => "Analysis",
+            "investigation" => "Investigation",
+            "review" => "Review",
+            "execution" => "Execution",
+            "reporting" => "Reporting",
+            "automation" => "Automation",
+            other => return serde_json::json!({ "Custom": other }),
+        };
+        serde_json::Value::String(capitalised.to_string())
+    }
+}
 
-    // 创建 Actor
-    let actor = ActorRef {
-        id: ActorId::from_string(args.requested_by.clone())?,
-        actor_type: ActorType::Human,
-        tenant_id: None,
-        home_node_id: None,
-        display_name: args.requested_by.clone(),
-    };
+fn parse_priority_for_server(raw: &str) -> anyhow::Result<&'static str> {
+    // Server's Priority enum is `#[serde(rename_all = "lowercase")]` —
+    // wire format is lowercase regardless of how it's printed in TaskKind.
+    // Keep this function aligned with the enum's rename rule, not Rust casing.
+    Ok(match raw.to_lowercase().as_str() {
+        "critical" => "critical",
+        "high" => "high",
+        "medium" => "medium",
+        "low" => "low",
+        other => anyhow::bail!("invalid priority '{}': use critical|high|medium|low", other),
+    })
+}
 
-    // 创建任务
-    let task = Task {
-        id: TaskId::new(),
-        case_id: None,
+async fn handle_create(args: TaskCreateArgs) -> anyhow::Result<()> {
+    let server = server_url(None);
+    let body = CreateTaskBody {
         title: args.title,
         summary: args.summary,
-        kind,
-        priority,
-        requested_by: actor,
-        requested_at: Utc::now(),
-        trigger: TriggerRef {
-            kind: "cli".to_string(),
-            source: "cyberclaw-cli".to_string(),
-        },
-        input: TaskInput::default(),
-        desired_outputs: vec![],
-        labels: vec![],
-        preferred_agent_id: None,
+        kind: parse_kind_for_server(&args.kind),
+        priority: parse_priority_for_server(&args.priority)?.to_string(),
+        labels: args.label,
     };
 
-    let task_id = task.id.clone();
-    state.task_manager.create_task(task).await?;
+    let resp: TaskSummaryView = post_json(&server, "/api/v1/tasks", &body)
+        .await
+        .map_err(|e| anyhow::anyhow!("❌ task create failed: {}", friendly_task_error(&e)))?;
 
-    println!("✓ Task created successfully: {}", task_id);
+    println!("✓ Task created: {}", resp.id);
+    if let Some(title) = resp.title {
+        println!("  title:    {}", title);
+    }
+    if let Some(status) = resp.status {
+        println!("  status:   {}", status);
+    }
     Ok(())
 }
 
-async fn handle_list(args: TaskListArgs, state: &CliState) -> anyhow::Result<()> {
-    let tasks = state.task_manager.list_tasks().await?;
+async fn handle_list(args: TaskListArgs) -> anyhow::Result<()> {
+    let server = server_url(None);
+    let path = match args.status.as_deref() {
+        // Status is a tiny enum (pending/running/completed/failed/cancelled),
+        // so a percent-encoder is overkill — reject anything outside the
+        // ASCII safe set explicitly.
+        Some(s) if !s.is_empty() => {
+            if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                format!("/api/v1/tasks?status={}", s)
+            } else {
+                anyhow::bail!(
+                    "invalid --status value '{}': must be ascii alphanumeric / dash / underscore",
+                    s
+                );
+            }
+        }
+        _ => "/api/v1/tasks".to_string(),
+    };
+
+    let resp: serde_json::Value = get_json(&server, &path)
+        .await
+        .map_err(|e| anyhow::anyhow!("❌ task list failed: {}", friendly_task_error(&e)))?;
+
+    // The server returns either a {"tasks":[...]} object or a bare array
+    // depending on filter/fallback path; normalise to a list of views.
+    let raw_list: Vec<serde_json::Value> = match &resp {
+        serde_json::Value::Array(arr) => arr.clone(),
+        serde_json::Value::Object(obj) => obj
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    let tasks: Vec<TaskSummaryView> = raw_list
+        .iter()
+        .filter_map(|v| serde_json::from_value::<TaskSummaryView>(v.clone()).ok())
+        .collect();
 
     match args.format {
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&tasks)?;
-            println!("{}", json);
+            println!("{}", serde_json::to_string_pretty(&raw_list)?);
         }
         OutputFormat::Text => {
             if tasks.is_empty() {
@@ -138,11 +228,24 @@ async fn handle_list(args: TaskListArgs, state: &CliState) -> anyhow::Result<()>
                 println!("Total tasks: {}\n", tasks.len());
                 for task in tasks {
                     println!("ID:       {}", task.id);
-                    println!("Title:    {}", task.title);
-                    println!("Kind:     {:?}", task.kind);
-                    println!("Priority: {:?}", task.priority);
-                    println!("By:       {}", task.requested_by.display_name);
-                    println!("At:       {}", task.requested_at);
+                    if let Some(title) = task.title {
+                        println!("Title:    {}", title);
+                    }
+                    if let Some(k) = task.kind {
+                        println!("Kind:     {}", short_value(&k));
+                    }
+                    if let Some(p) = task.priority {
+                        println!("Priority: {}", short_value(&p));
+                    }
+                    if let Some(status) = task.status {
+                        println!("Status:   {}", status);
+                    }
+                    if let Some(created) = task.created_at {
+                        println!("Created:  {}", created);
+                    }
+                    if let Some(requester) = task.requested_by {
+                        println!("By:       {}", short_value(&requester));
+                    }
                     println!("---");
                 }
             }
@@ -152,36 +255,146 @@ async fn handle_list(args: TaskListArgs, state: &CliState) -> anyhow::Result<()>
     Ok(())
 }
 
-async fn handle_get(args: TaskGetArgs, state: &CliState) -> anyhow::Result<()> {
-    let task_id = TaskId::from_string(args.task_id)?;
-    let task = state
-        .task_manager
-        .get_task(&task_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("task not found: {}", task_id))?;
+async fn handle_get(args: TaskGetArgs) -> anyhow::Result<()> {
+    let server = server_url(None);
+    // Task IDs are server-minted UUID v4 (`task-<uuid>`) — safe to splice
+    // directly. Reject anything else with a clear message before the round-trip.
+    if !args
+        .task_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "invalid task id '{}': must be ascii alphanumeric / dash / underscore",
+            args.task_id
+        );
+    }
+    let path = format!("/api/v1/tasks/{}", args.task_id);
+    let resp: serde_json::Value = get_json(&server, &path)
+        .await
+        .map_err(|e| anyhow::anyhow!("❌ task get failed: {}", friendly_task_error(&e)))?;
 
     match args.format {
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&task)?;
-            println!("{}", json);
+            println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         OutputFormat::Text => {
+            let view: TaskSummaryView = serde_json::from_value(resp.clone()).unwrap_or_else(|_| {
+                TaskSummaryView {
+                    id: args.task_id.clone(),
+                    title: None,
+                    summary: None,
+                    kind: None,
+                    priority: None,
+                    status: None,
+                    created_at: None,
+                    requested_by: None,
+                }
+            });
             println!("Task Details:");
-            println!("  ID:         {}", task.id);
-            println!("  Title:      {}", task.title);
-            println!("  Summary:    {}", task.summary);
-            println!("  Kind:       {:?}", task.kind);
-            println!("  Priority:   {:?}", task.priority);
-            println!(
-                "  Requested:  {} by {}",
-                task.requested_at, task.requested_by.display_name
-            );
-            println!(
-                "  Trigger:    {} ({})",
-                task.trigger.kind, task.trigger.source
-            );
+            println!("  ID:        {}", view.id);
+            if let Some(title) = view.title {
+                println!("  Title:     {}", title);
+            }
+            if let Some(summary) = view.summary {
+                println!("  Summary:   {}", summary);
+            }
+            if let Some(k) = view.kind {
+                println!("  Kind:      {}", short_value(&k));
+            }
+            if let Some(p) = view.priority {
+                println!("  Priority:  {}", short_value(&p));
+            }
+            if let Some(status) = view.status {
+                println!("  Status:    {}", status);
+            }
+            if let Some(created) = view.created_at {
+                println!("  Created:   {}", created);
+            }
+            if let Some(requester) = view.requested_by {
+                println!("  Requested: {}", short_value(&requester));
+            }
         }
     }
-
     Ok(())
+}
+
+/// Render a JSON value as a short single-line label suitable for column display.
+/// Strings: as-is. Enum-like objects {"Custom":"foo"}: render as `Custom(foo)`.
+/// ActorRef-shaped objects (multi-field with `display_name`): render the
+/// display_name verbatim, falling back to `id` if missing. Anything else:
+/// compact JSON.
+fn short_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) if map.len() == 1 => {
+            let (k, inner) = map.iter().next().expect("map.len() == 1");
+            match inner {
+                serde_json::Value::String(s) => format!("{}({})", k, s),
+                _ => serde_json::to_string(v).unwrap_or_else(|_| String::new()),
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // ActorRef-like: prefer display_name, fall back to id, then JSON dump.
+            if let Some(name) = map.get("display_name").and_then(|x| x.as_str()) {
+                return name.to_string();
+            }
+            if let Some(id) = map.get("id").and_then(|x| x.as_str()) {
+                return id.to_string();
+            }
+            serde_json::to_string(v).unwrap_or_else(|_| String::new())
+        }
+        _ => serde_json::to_string(v).unwrap_or_else(|_| String::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_kind_canonical() {
+        assert_eq!(parse_kind_for_server("analysis"), serde_json::json!("Analysis"));
+        assert_eq!(parse_kind_for_server("review"), serde_json::json!("Review"));
+    }
+
+    #[test]
+    fn parse_kind_custom_explicit() {
+        assert_eq!(
+            parse_kind_for_server("custom:bug-fix"),
+            serde_json::json!({ "Custom": "bug-fix" })
+        );
+    }
+
+    #[test]
+    fn parse_kind_unknown_falls_back_to_custom() {
+        assert_eq!(
+            parse_kind_for_server("compliance-audit"),
+            serde_json::json!({ "Custom": "compliance-audit" })
+        );
+    }
+
+    #[test]
+    fn parse_priority_canonical() {
+        assert_eq!(parse_priority_for_server("medium").unwrap(), "medium");
+        assert_eq!(parse_priority_for_server("CRITICAL").unwrap(), "critical");
+    }
+
+    #[test]
+    fn parse_priority_invalid_rejects() {
+        assert!(parse_priority_for_server("urgent").is_err());
+    }
+
+    #[test]
+    fn short_value_renders_string_bareword() {
+        assert_eq!(short_value(&serde_json::json!("Medium")), "Medium");
+    }
+
+    #[test]
+    fn short_value_renders_single_key_object_as_paren() {
+        assert_eq!(
+            short_value(&serde_json::json!({ "Custom": "bug-fix" })),
+            "Custom(bug-fix)"
+        );
+    }
 }

@@ -1,12 +1,21 @@
 //! CLI 应用状态管理
 //!
-//! 复用 cyberclaw-server 的核心组件，为 CLI 提供平台能力
+//! v1.x — the CLI is now a thin client of `cyberclaw-server`. Package
+//! management, status, and registry queries all flow through HTTP
+//! (`/api/v2/packages`, `/api/v2/status`, `/api/v1/{skills,connectors,...}`).
+//! Only a few legacy lanes (chat-tui llm client, local Connector registry
+//! used by debugging connectors directly) still own in-process objects.
+//!
+//! The old in-process `InMemoryRegistry` field was removed in v1.x — it
+//! produced "Installed package: ..." then evaporated on process exit, and
+//! `package list` always returned "No packages installed" because every
+//! invocation started with an empty registry. See the package management
+//! commands in `commands/package.rs` for the HTTP-driven replacement.
 
 use std::sync::Arc;
 
 use cyberclaw_connectors::dispatcher::CapabilityDispatcher;
 use cyberclaw_connectors::registry::ConnectorRegistry;
-use cyberclaw_control_plane::registry::{InMemoryRegistry, Registry};
 use cyberclaw_control_plane::task_manager::{InMemoryTaskManager, TaskManager};
 use cyberclaw_governance::engine::DefaultPolicyEngine;
 use cyberclaw_llm::prelude::GenericOpenAiClient;
@@ -17,15 +26,15 @@ use cyberclaw_observability::events::InMemoryEventRecorder;
 
 /// CLI 全局状态
 ///
-/// 整合 CyberClaw 核心组件，为 CLI 命令提供平台能力。
+/// Retains the LLM client + a process-local Connector registry for direct
+/// dispatch lanes (chat REPL, capability inspection); all
+/// 5-ecosystem-object queries are HTTP-driven.
 #[derive(Clone)]
 #[allow(dead_code)] // 部分字段保留供未来功能使用
 pub struct CliState {
     // ===== 核心平台层 =====
-    /// Package 注册表 (Agent/Skill/Connector)
-    pub package_registry: Arc<dyn Registry>,
-
-    /// Task 管理器
+    /// Task 管理器 (legacy `task` subcommand — in-process only;
+    /// scheduled to migrate to server's `/api/v1/tasks` in a follow-up).
     pub task_manager: Arc<dyn TaskManager>,
 
     /// Connector 注册表 (底层能力)
@@ -69,9 +78,6 @@ impl CliState {
         llm_api_key: Option<String>,
         llm_base_url: Option<String>,
     ) -> anyhow::Result<Self> {
-        // 创建 Package 注册表
-        let package_registry: Arc<dyn Registry> = Arc::new(InMemoryRegistry::new());
-
         // 创建 Task 管理器
         let task_manager: Arc<dyn TaskManager> = Arc::new(InMemoryTaskManager::new());
 
@@ -102,7 +108,6 @@ impl CliState {
         let event_recorder = Arc::new(InMemoryEventRecorder::new());
 
         Ok(Self {
-            package_registry,
             task_manager,
             connector_registry,
             capability_dispatcher,

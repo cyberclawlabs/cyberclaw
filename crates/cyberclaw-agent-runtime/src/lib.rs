@@ -8,6 +8,7 @@ pub mod config;
 pub mod constitution;
 pub mod context_compressor;
 pub mod deferred_registry;
+pub mod loop_governor;
 pub mod dsml_parser;
 pub mod error;
 pub mod loop_delegate;
@@ -22,6 +23,7 @@ pub mod tool_description;
 pub mod tool_result_budget;
 pub mod tool_result_pipeline;
 pub mod types;
+pub mod verify;
 
 pub use clarify::ClarifyCoordinator;
 pub use config::{AgentConfig, RuntimeConfig, ServiceConfig};
@@ -41,6 +43,15 @@ pub use sub_agent::{AgentHandle, AgentStatus, SpawnPolicy, SubAgentError, SubAge
 
 pub use context_compressor::{
     CompressedResult, CompressionConfig, CompressionStage, ContextCompressor, MemoryLevel,
+};
+
+pub use loop_governor::{
+    AgenticLoopGovernor, CostTracker, GovernorConfig, LoopCtx, LoopDecision, LoopProfile,
+};
+
+pub use verify::{
+    CodeBlockVerifier, JsonStructureVerifier, OutputVerifier, RegexAssertVerifier,
+    VerificationDirective, VerifierChain, VerifyCtx,
 };
 
 pub use streaming::{

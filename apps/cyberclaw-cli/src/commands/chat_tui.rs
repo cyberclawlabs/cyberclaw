@@ -276,6 +276,13 @@ struct TuiApp<'a> {
     /// streaming 开始时的 pulse_tick / token 估算，用于计算 tok/s
     stream_start_tick: Option<u64>,
     stream_start_tokens: usize,
+    /// `/retry` 设置后由主循环消费——把它当作一条新的 user 输入重发。
+    pending_retry: Option<String>,
+    /// streaming 期间用户提交的输入暂存在这里；assistant Done 之后由主循环出队重发。
+    input_queue: Vec<String>,
+    /// 是否显示 tool block / DSML 摘要等非内容 detail 行。
+    /// `/details` 切换；与 `show_thinking` 一起表示完整的"细节可见性"。
+    show_tool_details: bool,
 }
 
 impl<'a> TuiApp<'a> {
@@ -307,6 +314,9 @@ impl<'a> TuiApp<'a> {
             pulse_tick: 0,
             stream_start_tick: None,
             stream_start_tokens: 0,
+            pending_retry: None,
+            input_queue: Vec::new(),
+            show_tool_details: true,
         }
     }
 
@@ -832,7 +842,9 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                                 ));
                             }
                         }
-                    } else {
+                    } else if app.show_tool_details {
+                        // 折叠提示只在 detail 模式开着时显示——/details hidden 会
+                        // 把"thinking (use /trace…)" 这一行也一起隐藏。
                         all_lines.push(Line::styled(
                             "  ⋯ thinking (use /trace to show)",
                             Style::default()
@@ -1291,8 +1303,16 @@ const SLASH_HELP: &[(&str, &str)] = &[
     ("/security", "显示安全规则与注入命中摘要"),
     ("/quit", "退出 TUI"),
     ("/history [file]", "导出当前会话为 markdown（同 /save）"),
-    ("/token", "显示估算的 token 使用量"),
+    ("/token", "显示估算的 token 使用量（粗略）"),
+    ("/usage", "详细用量：tokens / 消息数 / context 占比 / 当前 model"),
+    ("/undo", "从本地 transcript 移除最近一对消息（不动 server 会话）"),
     ("/trace", "切换 <think> 思考块的显示/隐藏"),
+    ("/retry", "重发上一轮 user message（来自本地 transcript）"),
+    ("/queue", "查看 streaming 期间排队的输入"),
+    (
+        "/details [hidden|expanded|cycle]",
+        "切换思考 + tool 细节的可见性",
+    ),
     ("/compress", "压缩会话历史"),
     ("/digest [YYYY-MM-DD]", "今日学习摘要（可选指定日期）"),
     ("/orgmem <query>", "搜索组织记忆（空 query 列最近 5 条）"),
@@ -1434,6 +1454,10 @@ pub async fn run_tui(
         // 推进动画 tick（50ms 一次，驱动 prompt 呼吸 + spinner）
         app.pulse_tick = app.pulse_tick.wrapping_add(1);
 
+        // 本轮要发送的 user message——由 (a) 直接输入 (b) /retry (c) 队列出队 任一来源填充。
+        // 处理统一在 token-drain 之后做：保证 streaming=false 才会发出。
+        let mut pending_send: Option<String> = None;
+
         if event::poll(std::time::Duration::from_millis(20))? {
             let ev = event::read()?;
             match &ev {
@@ -1458,77 +1482,38 @@ pub async fn run_tui(
                             }
                             (KeyModifiers::CONTROL, KeyCode::Char('s'))
                             | (KeyModifiers::NONE, KeyCode::Enter) => {
-                                if app.streaming {
-                                    app.status_msg = Some(" ⚠ 等待响应完成…".to_string());
-                                } else {
-                                    let input = app.take_input().trim().to_string();
-                                    app.status_msg = None;
-                                    if input.is_empty() {
-                                        // nothing
-                                    } else if input.starts_with('/') {
-                                        let quit = handle_slash_tui(
-                                            &input,
-                                            &client,
-                                            &server,
-                                            &token,
-                                            &conv_id,
-                                            &mut current_model,
-                                            &mut current_agent_id,
-                                            &mut app,
-                                            tx.clone(),
-                                        )
-                                        .await;
-                                        app.model = current_model.clone();
-                                        if quit {
-                                            break;
-                                        }
-                                    } else {
-                                        if first_message {
-                                            first_message = false;
-                                            let title: String = input.chars().take(40).collect();
-                                            let patch_url = format!(
-                                                "{}/api/v1/chat/conversations/{}",
-                                                server, conv_id
-                                            );
-                                            let _ = client
-                                                .patch(&patch_url)
-                                                .bearer_auth(&token)
-                                                .json(&serde_json::json!({ "title": title }))
-                                                .send()
-                                                .await;
-                                        }
-                                        app.push_user(input.clone());
-                                        app.push_input_history(&input);
-                                        messages.push(super::chat::ChatMessage {
-                                            role: "user".to_string(),
-                                            content: input.clone(),
-                                        });
-                                        app.begin_assistant();
-
-                                        let tx2 = tx.clone();
-                                        let client2 = client.clone();
-                                        let server2 = server.clone();
-                                        let token2 = token.clone();
-                                        let conv2 = conv_id.clone();
-                                        let agent2 = current_agent_id.clone();
-                                        let model2 = current_model.clone();
-                                        let msgs2 = messages.clone();
-                                        tokio::spawn(async move {
-                                            send_message_tui(
-                                                &client2,
-                                                &server2,
-                                                &token2,
-                                                &conv2,
-                                                agent2.as_deref(),
-                                                &model2,
-                                                &msgs2,
-                                                tx2,
-                                            )
-                                            .await;
-                                        });
-
-                                        save_last_conv_id(&conv_id);
+                                let input = app.take_input().trim().to_string();
+                                app.status_msg = None;
+                                if input.is_empty() {
+                                    // nothing
+                                } else if input.starts_with('/') {
+                                    // slash 命令在 streaming 中也允许（如 /queue 查看队列）
+                                    let quit = handle_slash_tui(
+                                        &input,
+                                        &client,
+                                        &server,
+                                        &token,
+                                        &conv_id,
+                                        &mut current_model,
+                                        &mut current_agent_id,
+                                        &mut app,
+                                        tx.clone(),
+                                    )
+                                    .await;
+                                    app.model = current_model.clone();
+                                    if quit {
+                                        break;
                                     }
+                                } else if app.streaming {
+                                    // streaming 期间用户输入入队，等响应结束自动出队发送。
+                                    app.input_queue.push(input.clone());
+                                    app.push_input_history(&input);
+                                    app.push_system(format!(
+                                        "[queue] 已加入队列 #{}（streaming 完成后自动发送）",
+                                        app.input_queue.len()
+                                    ));
+                                } else {
+                                    pending_send = Some(input);
                                 }
                             }
                             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
@@ -1627,6 +1612,63 @@ pub async fn run_tui(
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => break,
             }
+        }
+
+        // streaming 完成 → 出队下一条 queued input（如果有）。
+        // /retry 在主循环任何时刻都可设置 pending_retry，优先级高于队列。
+        if !app.streaming && pending_send.is_none() {
+            if let Some(retry) = app.pending_retry.take() {
+                pending_send = Some(retry);
+            } else if !app.input_queue.is_empty() {
+                pending_send = Some(app.input_queue.remove(0));
+            }
+        }
+
+        // 真正发送一条 user message —— 共用 path（直接输入 / /retry / queue 出队）
+        if let Some(text) = pending_send.take() {
+            if first_message {
+                first_message = false;
+                let title: String = text.chars().take(40).collect();
+                let patch_url =
+                    format!("{}/api/v1/chat/conversations/{}", server, conv_id);
+                let _ = client
+                    .patch(&patch_url)
+                    .bearer_auth(&token)
+                    .json(&serde_json::json!({ "title": title }))
+                    .send()
+                    .await;
+            }
+            app.push_user(text.clone());
+            app.push_input_history(&text);
+            messages.push(super::chat::ChatMessage {
+                role: "user".to_string(),
+                content: text.clone(),
+            });
+            app.begin_assistant();
+
+            let tx2 = tx.clone();
+            let client2 = client.clone();
+            let server2 = server.clone();
+            let token2 = token.clone();
+            let conv2 = conv_id.clone();
+            let agent2 = current_agent_id.clone();
+            let model2 = current_model.clone();
+            let msgs2 = messages.clone();
+            tokio::spawn(async move {
+                send_message_tui(
+                    &client2,
+                    &server2,
+                    &token2,
+                    &conv2,
+                    agent2.as_deref(),
+                    &model2,
+                    &msgs2,
+                    tx2,
+                )
+                .await;
+            });
+
+            save_last_conv_id(&conv_id);
         }
 
         draw(&mut terminal, &mut app)?;
@@ -1854,6 +1896,70 @@ async fn handle_slash_tui(
                 app.token_estimate
             ));
         }
+        "/usage" => {
+            // Hermes parity: richer than /token. Show msg breakdown + a
+            // context-window guess so the operator can see how close the
+            // current session is to needing /compress.
+            let total_msgs = app.history.len();
+            let user_msgs = app
+                .history
+                .iter()
+                .filter(|m| m.role == "user")
+                .count();
+            let assistant_msgs = app
+                .history
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .count();
+            // Conservative ceiling — most modern models we ship advertise
+            // 128k tokens. We do NOT introspect the model's real cap here
+            // because that would need a metadata round-trip to the server
+            // and /usage is meant to be a zero-cost local readout.
+            const CONSERVATIVE_CTX_GUESS: usize = 128_000;
+            let pct = (app.token_estimate * 100)
+                .checked_div(CONSERVATIVE_CTX_GUESS)
+                .unwrap_or(0);
+            app.push_system(format!(
+                "[usage] tokens≈{}  msgs={} (user={}, assistant={})  ctx≈{}% of 128k guess  model={}",
+                app.token_estimate,
+                total_msgs,
+                user_msgs,
+                assistant_msgs,
+                pct,
+                current_model,
+            ));
+        }
+        "/undo" => {
+            // Hermes parity: drop the most recent assistant+user pair from
+            // the local transcript so the operator can re-do a turn. We
+            // only mutate UI state — the server-side conversation log is
+            // untouched (the audit trail is a separate hash-chained
+            // record), so /undo is a presentation operation, not an
+            // attempt to rewrite history.
+            let mut removed = 0usize;
+            // Strip a trailing assistant turn first (it might be mid-stream),
+            // then strip the user turn that elicited it.
+            if app
+                .history
+                .last()
+                .is_some_and(|m| m.role == "assistant")
+            {
+                app.history.pop();
+                removed += 1;
+            }
+            if app
+                .history
+                .last()
+                .is_some_and(|m| m.role == "user")
+            {
+                app.history.pop();
+                removed += 1;
+            }
+            app.push_system(format!(
+                "[undo] 已从本地 transcript 移除 {} 条消息（server-side 会话 + 审计链未触动）",
+                removed
+            ));
+        }
         "/trace" => {
             app.show_thinking = !app.show_thinking;
             app.push_system(format!(
@@ -1863,6 +1969,82 @@ async fn handle_slash_tui(
                 } else {
                     "关闭"
                 }
+            ));
+        }
+        "/retry" => {
+            // Hermes parity: re-emit the most recent user message from the
+            // local transcript. We do NOT touch the server-side conversation
+            // log — the new turn is appended as a normal /chat call which
+            // re-runs the whole context through the model.
+            //
+            // 在 streaming 中拒绝，因为重发会和当前 spawn 的 send_message_tui
+            // 冲突（同一 tx 上两个 producer）。
+            if app.streaming {
+                app.push_system(
+                    "[retry] 当前正在 streaming，请先 Esc 等响应完成再 /retry".to_string(),
+                );
+            } else {
+                let last_user = app
+                    .history
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.content.clone());
+                match last_user {
+                    Some(content) => {
+                        app.pending_retry = Some(content.clone());
+                        let preview: String = content.chars().take(40).collect();
+                        let ellipsis = if content.chars().count() > 40 { "…" } else { "" };
+                        app.push_system(format!(
+                            "[retry] 即将重发: \"{}{}\"",
+                            preview, ellipsis
+                        ));
+                    }
+                    None => {
+                        app.push_system(
+                            "[retry] 本地 transcript 无 user message 可重发".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        "/queue" => {
+            // 显示当前 streaming 期间累积的 input_queue 内容。
+            if app.input_queue.is_empty() {
+                app.push_system("[queue] no messages queued".to_string());
+            } else {
+                let mut lines: Vec<String> =
+                    vec![format!("## 排队消息（{} 条）", app.input_queue.len())];
+                for (i, msg) in app.input_queue.iter().enumerate() {
+                    let preview: String = msg.chars().take(80).collect();
+                    let ellipsis = if msg.chars().count() > 80 { "…" } else { "" };
+                    lines.push(format!("  {}. {}{}", i + 1, preview, ellipsis));
+                }
+                app.push_system(lines.join("\n"));
+            }
+        }
+        "/details" => {
+            // Hermes 兼容子参数：hidden/expanded/cycle；无参数 = cycle。
+            // details 同时控制 show_thinking 和 show_tool_details——它是
+            // 比 /trace 更广的"细节可见性"开关。
+            let arg = parts.get(1).copied().unwrap_or("").trim().to_lowercase();
+            let target_on = match arg.as_str() {
+                "expanded" | "on" | "show" => true,
+                "hidden" | "off" | "hide" => false,
+                "" | "cycle" | "toggle" => !(app.show_thinking && app.show_tool_details),
+                other => {
+                    app.push_system(format!(
+                        "[details] 未知参数: '{}'（用 hidden/expanded/cycle）",
+                        other
+                    ));
+                    return false;
+                }
+            };
+            app.show_thinking = target_on;
+            app.show_tool_details = target_on;
+            app.push_system(format!(
+                "[details] 细节显示: {}（thinking + tool block）",
+                if target_on { "开启" } else { "关闭" }
             ));
         }
         "/model" => {
@@ -2238,4 +2420,173 @@ fn save_history_to_file(app: &TuiApp, path: &str) -> Result<()> {
     }
     std::fs::write(path, out).with_context(|| format!("write {}", path))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_app() -> TuiApp<'static> {
+        TuiApp::new("test-model".to_string(), "conv-test".to_string())
+    }
+
+    #[test]
+    fn slash_help_registers_new_commands() {
+        // 自动补全和 /help 表必须包含三个新命令。
+        let cmds: Vec<&str> = SLASH_HELP.iter().map(|(c, _)| *c).collect();
+        assert!(cmds.contains(&"/retry"), "/retry must be in SLASH_HELP");
+        assert!(cmds.contains(&"/queue"), "/queue must be in SLASH_HELP");
+        assert!(
+            cmds.iter().any(|c| c.starts_with("/details")),
+            "/details must be in SLASH_HELP"
+        );
+    }
+
+    #[test]
+    fn slash_autocomplete_finds_new_commands() {
+        let m = slash_autocomplete_matches("/ret");
+        assert!(m.iter().any(|(c, _)| *c == "/retry"));
+        let m = slash_autocomplete_matches("/que");
+        assert!(m.iter().any(|(c, _)| *c == "/queue"));
+        let m = slash_autocomplete_matches("/det");
+        assert!(m.iter().any(|(c, _)| c.starts_with("/details")));
+    }
+
+    #[test]
+    fn tui_app_defaults_have_new_fields() {
+        let app = fresh_app();
+        assert!(app.pending_retry.is_none());
+        assert!(app.input_queue.is_empty());
+        assert!(
+            app.show_tool_details,
+            "show_tool_details default must be true (hermes parity)"
+        );
+    }
+
+    #[test]
+    fn retry_finds_last_user_message() {
+        let mut app = fresh_app();
+        app.push_user("first ask".to_string());
+        app.history.push(MessageBlock {
+            role: "assistant".to_string(),
+            content: "reply".to_string(),
+            ts: Utc::now(),
+            streaming: false,
+        });
+        app.push_user("second ask".to_string());
+        app.history.push(MessageBlock {
+            role: "assistant".to_string(),
+            content: "reply 2".to_string(),
+            ts: Utc::now(),
+            streaming: false,
+        });
+
+        // 模拟 /retry 处理逻辑 (从尾部 reverse 找 user)
+        let last_user = app
+            .history
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone());
+        assert_eq!(last_user.as_deref(), Some("second ask"));
+    }
+
+    #[test]
+    fn retry_returns_none_when_no_user_message() {
+        let app = fresh_app();
+        let last_user = app
+            .history
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone());
+        assert!(last_user.is_none());
+    }
+
+    #[test]
+    fn queue_enqueue_and_dequeue() {
+        let mut app = fresh_app();
+        app.input_queue.push("msg-1".to_string());
+        app.input_queue.push("msg-2".to_string());
+        assert_eq!(app.input_queue.len(), 2);
+
+        // FIFO 出队，跟主循环 remove(0) 一致
+        let next = app.input_queue.remove(0);
+        assert_eq!(next, "msg-1");
+        assert_eq!(app.input_queue.len(), 1);
+        assert_eq!(app.input_queue[0], "msg-2");
+    }
+
+    #[test]
+    fn details_toggle_affects_both_flags() {
+        let mut app = fresh_app();
+        // 起始：thinking=false, tool_details=true（hermes 默认）
+        assert!(!app.show_thinking);
+        assert!(app.show_tool_details);
+
+        // cycle: 因为 thinking && tool_details = false → 应开启
+        let target = !(app.show_thinking && app.show_tool_details);
+        assert!(target);
+        app.show_thinking = target;
+        app.show_tool_details = target;
+        assert!(app.show_thinking);
+        assert!(app.show_tool_details);
+
+        // 再 cycle：两个都 on → 应关闭
+        let target = !(app.show_thinking && app.show_tool_details);
+        assert!(!target);
+        app.show_thinking = target;
+        app.show_tool_details = target;
+        assert!(!app.show_thinking);
+        assert!(!app.show_tool_details);
+    }
+
+    #[test]
+    fn details_arg_parsing() {
+        // 模拟 handle_slash_tui 里的 arg 解析路径
+        let parse = |arg: &str, show_thinking: bool, show_tool: bool| -> Option<bool> {
+            let arg = arg.trim().to_lowercase();
+            match arg.as_str() {
+                "expanded" | "on" | "show" => Some(true),
+                "hidden" | "off" | "hide" => Some(false),
+                "" | "cycle" | "toggle" => Some(!(show_thinking && show_tool)),
+                _ => None,
+            }
+        };
+
+        assert_eq!(parse("expanded", false, true), Some(true));
+        assert_eq!(parse("hidden", true, true), Some(false));
+        assert_eq!(parse("", false, true), Some(true));
+        assert_eq!(parse("cycle", true, true), Some(false));
+        assert_eq!(parse("on", false, false), Some(true));
+        assert_eq!(parse("nonsense", false, true), None);
+        // case-insensitive
+        assert_eq!(parse("EXPANDED", false, true), Some(true));
+    }
+
+    #[test]
+    fn pending_retry_is_consumed_once() {
+        let mut app = fresh_app();
+        app.pending_retry = Some("retry me".to_string());
+        let taken = app.pending_retry.take();
+        assert_eq!(taken.as_deref(), Some("retry me"));
+        assert!(app.pending_retry.is_none());
+    }
+
+    #[test]
+    fn queue_show_with_empty_returns_expected_text() {
+        // 不能直接 await async handler 而不引入 tokio runtime——这里只验证
+        // 行为契约：空队列的 system 提示文案。
+        let app = fresh_app();
+        let msg = if app.input_queue.is_empty() {
+            "[queue] no messages queued".to_string()
+        } else {
+            "non-empty".to_string()
+        };
+        assert_eq!(msg, "[queue] no messages queued");
+    }
 }

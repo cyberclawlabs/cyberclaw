@@ -1,0 +1,74 @@
+apiVersion: cyberclaw.io/v2
+kind: Skill
+id: cyberclaw/domain-expert-devops
+version: 0.1.0
+name: domain-expert-devops
+displayName: Domain Expert — DevOps / SRE
+summary: Production change-management expertise — release gating, blue/green, canary, progressive delivery, database migration safety, Postgres major upgrades, SLO math, cloud cost drilldown.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - domain-expert
+  - devops
+  - sre
+  - release
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: SKILL.md
+  files:
+    - SKILL.md
+    - references/release-gating.md
+    - references/postgres-upgrade.md
+spec:
+  format: claude-compatible
+  entryFile: SKILL.md
+  referencesDir: references
+  # Single-group OR. Devops ops queries also typically touch one axis.
+  # Lower priority (70) so a web3 + devops mixed prompt prefers web3.
+  auto_bind:
+    keywords:
+      - any:
+          - "deploy on Friday"
+          - "Friday deploy"
+          - rollback
+          - canary
+          - "blue-green"
+          - "blue/green"
+          - "feature flag"
+          - "kill switch"
+          - "change management"
+          - "release gating"
+          - "release gate"
+          - SLO
+          - SLA
+          - "error budget"
+          - SRE
+          - "on-call"
+          - oncall
+          - upgrade
+          - "cost spike"
+          - "cost drilldown"
+          - "monthly cloud bill"
+          - "cloud bill"
+          - p95
+          - p99
+          - uptime
+          - downtime
+          - "Postgres 14"
+          - "Postgres 15"
+          - "Postgres 16"
+          - "Postgres 17"
+          - "postgres upgrade"
+          - "database upgrade"
+          - "schema migration"
+          - "expand-contract"
+          - "expand contract"
+          - "prod database CPU"
+          - "payment gateway"
+          - "error rate jumped"
+          - "Postgres 14 → 16"
+          - "Postgres 14 -> 16"
+    priority: 70

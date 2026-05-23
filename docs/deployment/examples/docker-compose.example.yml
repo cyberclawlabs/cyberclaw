@@ -1,0 +1,315 @@
+# CyberClaw Docker Compose 配置示例
+#
+# 使用说明:
+# 1. 复制此文件为 docker-compose.yml
+# 2. 配置环境变量 (.env 文件或 environment 部分)
+# 3. 根据部署环境调整 (开发/测试/生产)
+# 4. 启动服务: docker-compose up -d
+# 5. 查看状态: docker-compose ps
+# 6. 查看日志: docker-compose logs -f cyberclaw-server
+#
+# 本示例包含多个配置场景：
+# - 基础部署 (仅 CyberClaw)
+# - 完整生产部署 (包含 Nginx 反向代理)
+# - 扩展配置 (包含监控和日志)
+
+version: '3.8'
+
+# ============================================
+# 服务定义
+# ============================================
+services:
+  # ============================================
+  # CyberClaw HTTP 服务器
+  # ============================================
+  cyberclaw-server:
+    # 镜像配置
+    # 可选选项:
+    # 1. 使用预建镜像:
+    image: cyberclaw-server:latest
+    # 2. 从源码构建:
+    # build:
+    #   context: .
+    #   dockerfile: apps/cyberclaw-server/Dockerfile
+    #   cache_from:
+    #     - cyberclaw-server:latest
+
+    # 容器名称
+    container_name: cyberclaw-server
+
+    # 重启策略
+    restart: always
+    # 其他选项: no, always, on-failure, unless-stopped
+
+    # 环境变量配置
+    environment:
+      # LLM 配置
+      LLM_PROVIDER: openai
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_BASE_URL: https://api.openai.com/v1
+
+      # 服务器配置
+      CYBERCLAW_ADDR: 0.0.0.0:3000
+      CYBERCLAW_TIMEOUT: 30
+
+      # 安全配置
+      JWT_SECRET: ${JWT_SECRET}
+      USE_TLS: "false"  # 如果使用 Nginx 反向代理，则为 false
+      # USE_TLS: "true"
+      # TLS_CERT_PATH: /etc/ssl/certs/server.crt
+      # TLS_KEY_PATH: /etc/ssl/private/server.key
+
+      # 日志配置
+      RUST_LOG: info
+
+      # CORS 配置
+      CYBERCLAW_CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+
+      # 速率限制
+      RATE_LIMIT_PER_SECOND: 50
+      RATE_LIMIT_BURST_SIZE: 200
+
+      # 运行环境
+      CYBERCLAW_ENV: production
+
+    # 使用 .env 文件 (覆盖 environment 部分)
+    # env_file:
+    #   - .env.production
+
+    # 端口映射
+    ports:
+      - "3000:3000"     # HTTP (如果未使用 TLS)
+      # - "443:443"     # HTTPS (如果启用 TLS)
+
+    # 卷挂载
+    volumes:
+      # 日志输出
+      - ./logs/app:/var/log/cyberclaw
+
+      # TLS 证书 (如果需要)
+      # - /etc/ssl/certs/server.crt:/etc/ssl/certs/server.crt:ro
+      # - /etc/ssl/private/server.key:/etc/ssl/private/server.key:ro
+
+      # 配置文件 (如果需要)
+      # - ./config:/etc/cyberclaw:ro
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '2'              # 最多使用 2 CPU
+          memory: 4G             # 最多使用 4GB 内存
+        reservations:
+          cpus: '1'              # 预留 1 CPU
+          memory: 2G             # 预留 2GB 内存
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s              # 每 30 秒检查一次
+      timeout: 10s               # 超时时间
+      retries: 3                 # 失败 3 次后标记为不健康
+      start_period: 10s          # 启动延迟
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"          # 单个日志文件最大 10MB
+        max-file: "3"            # 保留最多 3 个日志文件
+        labels: "service=cyberclaw-server"
+
+    # 网络配置
+    networks:
+      - cyberclaw-net
+
+    # 依赖关系 (可选)
+    depends_on:
+      # 如果有其他依赖服务，可以在这里声明
+      # redis:
+      #   condition: service_healthy
+      # db:
+      #   condition: service_healthy
+
+  # ============================================
+  # Nginx 反向代理 (可选)
+  # ============================================
+  nginx:
+    image: nginx:latest
+    restart: always
+    container_name: cyberclaw-nginx
+
+    ports:
+      - "80:80"        # HTTP
+      - "443:443"      # HTTPS
+
+    volumes:
+      # 配置文件
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+      # TLS 证书
+      - /etc/letsencrypt/live/cyberclaw.example.com:/etc/nginx/certs:ro
+
+      # 日志
+      - ./logs/nginx:/var/log/nginx
+
+      # Certbot 验证目录 (用于 Let's Encrypt)
+      - ./certbot:/var/www/certbot:ro
+
+    depends_on:
+      cyberclaw-server:
+        condition: service_healthy
+
+    networks:
+      - cyberclaw-net
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Nginx 不需要特殊的健康检查
+    # 如果需要，可以添加:
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost/health"]
+    #   interval: 30s
+
+  # ============================================
+  # Redis (可选，用于缓存)
+  # ============================================
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: cyberclaw-redis
+  #   restart: always
+  #
+  #   command: redis-server --appendonly yes
+  #
+  #   ports:
+  #     - "6379:6379"
+  #
+  #   volumes:
+  #     - redis-data:/data
+  #
+  #   networks:
+  #     - cyberclaw-net
+  #
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+  #
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+
+  # ============================================
+  # Prometheus (可选，用于监控)
+  # ============================================
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: cyberclaw-prometheus
+  #   restart: always
+  #
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - prometheus-data:/prometheus
+  #
+  #   ports:
+  #     - "9090:9090"
+  #
+  #   command:
+  #     - "--config.file=/etc/prometheus/prometheus.yml"
+  #     - "--storage.tsdb.path=/prometheus"
+  #
+  #   networks:
+  #     - cyberclaw-net
+
+  # ============================================
+  # Grafana (可选，用于可视化)
+  # ============================================
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: cyberclaw-grafana
+  #   restart: always
+  #
+  #   environment:
+  #     GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+  #
+  #   volumes:
+  #     - grafana-storage:/var/lib/grafana
+  #
+  #   ports:
+  #     - "3001:3000"
+  #
+  #   networks:
+  #     - cyberclaw-net
+  #
+  #   depends_on:
+  #     - prometheus
+
+# ============================================
+# 网络定义
+# ============================================
+networks:
+  cyberclaw-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# ============================================
+# 卷定义
+# ============================================
+volumes:
+  # Redis 数据卷
+  # redis-data:
+  #   driver: local
+
+  # Prometheus 数据卷
+  # prometheus-data:
+  #   driver: local
+
+  # Grafana 数据卷
+  # grafana-storage:
+  #   driver: local
+
+# ============================================
+# 快速参考
+# ============================================
+#
+# 启动所有服务:
+# docker-compose up -d
+#
+# 查看服务状态:
+# docker-compose ps
+#
+# 查看日志:
+# docker-compose logs -f
+# docker-compose logs -f cyberclaw-server
+#
+# 进入容器:
+# docker-compose exec cyberclaw-server bash
+#
+# 执行命令:
+# docker-compose exec cyberclaw-server curl http://localhost:3000/health
+#
+# 停止服务:
+# docker-compose stop
+#
+# 删除容器:
+# docker-compose down
+#
+# 删除容器和卷:
+# docker-compose down -v
+#
+# 重启特定服务:
+# docker-compose restart cyberclaw-server
+#
+# 查看资源使用:
+# docker stats
+#
+# 更新镜像并重启:
+# docker-compose pull && docker-compose up -d

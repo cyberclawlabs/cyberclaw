@@ -805,7 +805,7 @@ mod tests {
             ControlPlaneOrchestrator::new(
                 gateway,
                 resolver,
-                registry,
+                registry.clone(),
                 review_queue.clone(),
                 task_manager.clone(),
                 execution_service.clone(),
@@ -824,6 +824,7 @@ mod tests {
             task_manager,
             execution_service,
             review_queue,
+            package_registry: registry,
         };
         let state = Arc::new(AppState::new(
             llm_client,

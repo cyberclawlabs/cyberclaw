@@ -3,7 +3,7 @@
 - Status: Active
 - Scope: Crate
 - Owner: CyberClaw Maintainers
-- Last Updated: 2026-04-14
+- Last Updated: 2026-05-23
 
 Connector 实现与能力分发。
 
@@ -13,7 +13,9 @@ Connector 实现与能力分发。
 
 - **LocalConnector**: 本地文件系统、命令执行、搜索能力
 - **BrowserConnector**: 附着到现有 Chrome/Chromium DevTools endpoint，提供 CDP 浏览器自动化能力
-- **CapabilityDispatcher**: 能力路由与分发
+- **CapabilityDispatcher**: 能力路由与分发，通过 `DispatchInterceptor` 链进行预/后处理
+- **DispatchInterceptor**: 统一拦截层，提供 WallClock / SandboxInjection / TruncationMetadata 三个默认拦截器
+- **SandboxProfile**: `cmd.run` 运行时隔离配置，支持 minimal / dev / isolated 三种预设
 - **Runtime Isolation**: 运行时隔离与安全执行
 
 ## 架构
@@ -21,9 +23,15 @@ Connector 实现与能力分发。
 ```
 Agent -> Skill -> Connector -> Capability
                      ↓
+            DispatchInterceptor chain
+          (WallClock / SandboxInjection / TruncationMetadata)
+                     ↓
               Runtime Selection
                 ↓       ↓       ↓
              Native  Process  Container
+                               ↓
+                        SandboxProfile
+                   (minimal / dev / isolated)
 ```
 
 ## LocalConnector 能力
@@ -78,6 +86,56 @@ endpoint，不负责安装、启动或托管浏览器进程。服务端设置
   - 支持 `inspect` 只读检查模式（不调用 handler）
   - 能力契约为 `RiskLevel::Medium`，`effects = [Read, Execute]`
 - 其余 `host.*`（plan/worktree/task/team/todo/cron/lsp/repl/remote-trigger 等）均通过 `LocalConnector` 统一调度
+
+## DispatchInterceptor 架构
+
+**文件**: `src/dispatch_interceptor/`（新增，2026-05-23，commit `87b0562`）
+
+`DispatchInterceptor` 是 `CapabilityDispatcher` 的统一拦截层，每次 dispatch 调用前后均会执行。实现 `DispatchInterceptor` trait 后注册到 dispatcher，即可在不修改 connector 实现的前提下添加横切关注点。
+
+三个默认拦截器：
+
+| 拦截器 | 职责 |
+|--------|------|
+| `WallClockInterceptor` | 记录每次 dispatch 的实际耗时，写入执行上下文 |
+| `SandboxInjectionInterceptor` | 将当前 `SandboxProfile` 注入执行上下文，由 cmd.run 读取 |
+| `TruncationMetadataInterceptor` | 检测工具输出是否被截断，写入 `_meta.truncated` 标志 |
+
+12 个单元测试覆盖各拦截器的前/后钩子行为。
+
+## SandboxProfile (cmd.run)
+
+**文件**: `src/sandbox/profile.rs`（新增，2026-05-23，commit `b960c89`）
+
+`SandboxProfile` 为 `cmd.run` 能力提供三种命名隔离预设：
+
+| Profile | 网络 | 文件系统写 | 适用场景 |
+|---------|------|-----------|---------|
+| `minimal` | 禁止 | 仅限 workspace | 生产环境受控执行 |
+| `dev` | 禁止 | workspace 内可写 | 开发调试 |
+| `isolated` | 完全阻断 | 完全阻断 | 高风险命令沙盒 |
+
+Profile 通过 `SandboxInjectionInterceptor` 自动注入，无需在每个 capability 调用点手动传递。
+
+## 行为变更说明 (2026-05-23)
+
+### search.grep — case_insensitive 默认改为 true
+
+**文件**: `src/local/cmd.rs`，commit `4a03432`
+
+`case_insensitive` 参数的默认值由 `false` 改为 `true`。依赖大小写敏感搜索的调用方需显式传入 `case_insensitive: false`。
+
+### search.grep — Count 模式改为按行计数
+
+**文件**: `src/local/cmd.rs`，commit `983845c`
+
+Count 模式的旧 fallback 路径返回的是文件数，不是匹配行数。现已修正为返回实际匹配行数总计。依赖旧行为（文件数）的调用方需切换到 `files` 输出模式。
+
+### Container 运行时 — workspace 挂载路径改为 host 真实路径
+
+**文件**: `src/runtime/container.rs`，commit `957d435`
+
+容器内工作区不再挂载为 `/workspace`，而是以宿主机真实路径 1:1 挂载（如 `/Users/max/project/foo` → `/Users/max/project/foo`）。容器内的绝对路径引用因此可以直接使用宿主机路径，无需路径转换。依赖 `/workspace` 前缀的调用方需更新为宿主机路径。
 
 ## 新增模块 (2026-03-21)
 

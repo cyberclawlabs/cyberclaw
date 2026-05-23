@@ -6,6 +6,11 @@ pub mod audio;
 // `Connector` trait, so widening the visibility doesn't expand the
 // surface — it only lets external crates read the facade declarations.
 pub mod cmd;
+// Sprint 3 PART A (2026-05-21, optimization-plan-v1 §R2) — function-level
+// code-execution helper for the agent-runtime OutputVerifier chain. Not a
+// `Capability` by design (see `exec_runtime` doc-comment); exposed here so
+// `cyberclaw-agent-runtime` can call `run_code(..)` from `verify.rs`.
+pub mod exec_runtime;
 pub mod fs;
 mod host;
 pub mod image_gen;

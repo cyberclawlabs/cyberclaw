@@ -502,6 +502,21 @@ async fn main() -> Result<()> {
     use cyberclaw_control_plane::registry::InMemoryRegistry;
     let registry = Arc::new(InMemoryRegistry::new());
     bootstrap_registry_from_ecosystem(registry.clone()).await?;
+
+    // v1.x — re-apply user-installed packages (`~/.cyberclaw/installed-packages.json`)
+    // AFTER ecosystem auto-scan so any package the operator explicitly
+    // installed via `POST /api/v2/packages` wins over the repo default
+    // with the same id. Failures are logged + skipped — never fatal.
+    let installed_pkg_store =
+        Arc::new(cyberclaw_server::installed_packages::InstalledPackageStore::load_default());
+    match cyberclaw_server::api::packages::bootstrap_user_packages(&registry, &installed_pkg_store)
+        .await
+    {
+        Ok(count) if count > 0 => info!("✓ Restored {} user-installed package(s)", count),
+        Ok(_) => info!("No user-installed packages to restore"),
+        Err(e) => warn!(error = %e, "user-installed packages reload failed; continuing"),
+    }
+
     let resolver = Arc::new(InMemoryResolver::new(registry.clone()));
     info!("✓ Resolver initialized");
 
@@ -607,6 +622,7 @@ async fn main() -> Result<()> {
         task_manager,
         execution_service: execution_service.clone(),
         review_queue,
+        package_registry: registry.clone(),
     };
 
     // Initialize append-only audit sink (Sprint 8 Lane 1). The path

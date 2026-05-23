@@ -14,7 +14,7 @@ use std::path::PathBuf;
 #[derive(Debug, Args, Clone)]
 pub struct DoctorArgs {
     /// Run only the specified check(s). Comma-separated.
-    /// Valid values: llm, config, users, governance, connectors, drift, server
+    /// Valid values: llm, config, users, governance, connectors, drift, server, ecosystem
     #[arg(long, value_delimiter = ',')]
     pub check: Vec<String>,
 
@@ -287,33 +287,100 @@ fn check_governance(config_dir: &std::path::Path) -> CheckResult {
     }
 }
 
-fn check_connectors(config_dir: &std::path::Path) -> CheckResult {
-    let path = config_dir.join("config.toml");
-    let count = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|c| c.parse::<toml::Value>().ok())
-        .and_then(|v| {
-            v.get("connectors")
-                .and_then(|c| c.as_array())
-                .map(|a| a.len())
-        })
-        .unwrap_or(0);
+/// Server-mediated connector count. Replaces the old config.toml-scanning
+/// variant — connectors load from `ecosystem/connectors/` at server boot,
+/// not from `~/.cyberclaw/config.toml`, so the file scan was structurally
+/// misleading (always 0 in healthy installs).
+async fn check_connectors(_config_dir: &std::path::Path) -> CheckResult {
+    #[derive(serde::Deserialize)]
+    struct StatusBrief {
+        #[serde(default)]
+        connectors: usize,
+    }
+
+    let server =
+        std::env::var("CYBERCLAW_SERVER").unwrap_or_else(|_| "http://127.0.0.1:38090".into());
+    let status_url = format!("{}/api/v2/status", server.trim_end_matches('/'));
+    let token_path =
+        cyberclaw_control_plane::wizard_engine::default_config_dir().join("cli-token");
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .no_proxy()
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckResult {
+                name: "connectors",
+                emoji: "🔌",
+                status: Status::Fail,
+                detail: format!("could not build HTTP client: {}", e),
+            };
+        }
+    };
+    let mut req = client.get(&status_url);
+    if let Ok(tok) = std::fs::read_to_string(&token_path) {
+        let t = tok.trim();
+        if !t.is_empty() {
+            req = req.bearer_auth(t);
+        }
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return CheckResult {
+                name: "connectors",
+                emoji: "🔌",
+                status: Status::Warn,
+                detail: format!("server unreachable at {}: {}", status_url, e),
+            };
+        }
+    };
+    if !resp.status().is_success() {
+        return CheckResult {
+            name: "connectors",
+            emoji: "🔌",
+            status: Status::Warn,
+            detail: format!("/api/v2/status returned HTTP {}", resp.status()),
+        };
+    }
+    let status: StatusBrief = match resp.json().await {
+        Ok(s) => s,
+        Err(e) => {
+            return CheckResult {
+                name: "connectors",
+                emoji: "🔌",
+                status: Status::Warn,
+                detail: format!("status JSON parse failed: {}", e),
+            };
+        }
+    };
+    let count = status.connectors;
     if count >= 6 {
         CheckResult {
             name: "connectors",
             emoji: "🔌",
             status: Status::Ok,
-            detail: format!("{} connectors configured", count),
+            detail: format!("{} connectors registered (server)", count),
         }
-    } else {
+    } else if count >= 1 {
         CheckResult {
             name: "connectors",
             emoji: "🔌",
             status: Status::Warn,
             detail: format!(
-                "{} connectors configured (recommended ≥ 6); check ecosystem/connectors",
+                "{} connectors registered (recommended ≥ 6); check ecosystem/connectors",
                 count
             ),
+        }
+    } else {
+        CheckResult {
+            name: "connectors",
+            emoji: "🔌",
+            status: Status::Fail,
+            detail: "0 connectors registered (ecosystem scan likely failed); check server log"
+                .into(),
         }
     }
 }
@@ -415,6 +482,104 @@ async fn check_server() -> CheckResult {
     }
 }
 
+/// Hit GET /api/v2/status (the server-side aggregate) so doctor reports the
+/// **live** ecosystem load instead of just what config files claim. This
+/// catches the failure mode where everything looks right on disk but server
+/// boot dropped packages.
+async fn check_ecosystem() -> CheckResult {
+    #[derive(serde::Deserialize)]
+    struct StatusBrief {
+        #[serde(default)]
+        agents: usize,
+        #[serde(default)]
+        skills: usize,
+        #[serde(default)]
+        connectors: usize,
+        #[serde(default)]
+        plugins: usize,
+        #[serde(default)]
+        capabilities: usize,
+    }
+
+    let server =
+        std::env::var("CYBERCLAW_SERVER").unwrap_or_else(|_| "http://127.0.0.1:38090".into());
+    let status_url = format!("{}/api/v2/status", server.trim_end_matches('/'));
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .no_proxy()
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckResult {
+                name: "ecosystem",
+                emoji: "📦",
+                status: Status::Fail,
+                detail: format!("could not build HTTP client: {}", e),
+            };
+        }
+    };
+
+    // Inline token load: doctor doesn't carry a CliState here, so re-read
+    // ~/.cyberclaw/cli-token directly. Anonymous probe still works if the
+    // server permits unauthed status reads; if not, we'll see 401.
+    let token_path =
+        cyberclaw_control_plane::wizard_engine::default_config_dir().join("cli-token");
+    let mut req = client.get(&status_url);
+    if let Ok(tok) = std::fs::read_to_string(&token_path) {
+        let t = tok.trim();
+        if !t.is_empty() {
+            req = req.bearer_auth(t);
+        }
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<StatusBrief>().await {
+            Ok(s) => {
+                let detail = format!(
+                    "agents={} skills={} connectors={} plugins={} capabilities={}",
+                    s.agents, s.skills, s.connectors, s.plugins, s.capabilities
+                );
+                // Heuristic: an empty registry on a fresh boot is suspicious;
+                // 0 connectors means even the built-in local connector failed
+                // to load, which is always a real failure.
+                let status = if s.connectors == 0 || s.capabilities == 0 {
+                    Status::Fail
+                } else if s.skills == 0 || s.agents == 0 {
+                    Status::Warn
+                } else {
+                    Status::Ok
+                };
+                CheckResult {
+                    name: "ecosystem",
+                    emoji: "📦",
+                    status,
+                    detail,
+                }
+            }
+            Err(e) => CheckResult {
+                name: "ecosystem",
+                emoji: "📦",
+                status: Status::Warn,
+                detail: format!("status JSON parse failed: {}", e),
+            },
+        },
+        Ok(resp) => CheckResult {
+            name: "ecosystem",
+            emoji: "📦",
+            status: Status::Warn,
+            detail: format!("/api/v2/status returned HTTP {}", resp.status()),
+        },
+        Err(e) => CheckResult {
+            name: "ecosystem",
+            emoji: "📦",
+            status: Status::Warn,
+            detail: format!("server unreachable at {}: {}", status_url, e),
+        },
+    }
+}
+
 // ============================================================================
 // Entry point
 // ============================================================================
@@ -443,13 +608,16 @@ pub async fn handle_doctor(args: DoctorArgs) -> Result<()> {
         results.push(check_governance(&config_dir));
     }
     if should_run("connectors") {
-        results.push(check_connectors(&config_dir));
+        results.push(check_connectors(&config_dir).await);
     }
     if should_run("drift") {
         results.push(check_drift(&config_dir));
     }
     if should_run("server") {
         results.push(check_server().await);
+    }
+    if should_run("ecosystem") {
+        results.push(check_ecosystem().await);
     }
 
     match args.format.as_str() {

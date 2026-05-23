@@ -1,167 +1,195 @@
 # CyberClaw
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge" alt="License"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.75%2B-orange?style=for-the-badge&logo=rust&logoColor=white" alt="Rust"></a>
-  <a href="docs/README.md"><img src="https://img.shields.io/badge/Docs-portal-blueviolet?style=for-the-badge" alt="Docs"></a>
-  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/Lang-中文-red?style=for-the-badge" alt="中文"></a>
-</p>
+- Status: Active
+- Scope: Repository
+- Owner: CyberClaw Maintainers
+- Last Updated: 2026-04-18
 
-<p align="center"><strong>Safe, controlled agent platform for high-stakes business environments.</strong></p>
+<div align="center">
 
-> ⚠ **Status: Beta — research and development. Do not connect real funds, production databases, or live business systems to CyberClaw at this stage.**
+**Governable agent infrastructure for high-stakes, real-world systems**
 
-CyberClaw is an agent runtime that makes governance, audit, identity, and external integration the agent's only path to real systems. Every action passes rule evaluation, escalates to human approval when required, and is fully recorded in a verifiable audit chain. Built for security operations, DevOps, Web3, and other high-stakes business contexts.
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-portal-blue.svg)](docs/README.md)
 
-[Docs](docs/README.md) · [Quick start](docs/GUIDE.md) · [简体中文](README.zh-CN.md)
+[English](README.md) | [简体中文](README.zh-CN.md)
 
----
+</div>
 
-## Security architecture
+### What Is CyberClaw?
 
-Security is not a layered add-on in CyberClaw. It is native to the design, from the programming language up through the interface boundary — every action an agent takes toward the outside world must traverse all of these:
+CyberClaw is not trying to build a more conversational Agent. It is built to let Agents participate in high-stakes, real-world systems without giving up safety, control, or auditability.
 
-- **Language layer** — implemented in Rust. Memory safety and the absence of data races are statically guaranteed by the compiler; entire bug classes (buffer overflow, use-after-free, dangling pointers) are eliminated.
-- **Sandbox and execution isolation** — the same Capability can run under multiple runtimes (local, isolated process, container, remote). High-risk operations default to container isolation; a single agent's failure or compromise does not contaminate others.
-- **Model layer** — part of the system prompt is fixed by the server and cannot be rewritten by the model.
-- **I/O layer** — tool outputs pass through prompt-injection and credential scanning before reaching the model context.
-- **Execution layer** — high-risk capabilities are temporarily revoked under autopilot; consecutive failures force exit.
-- **Interface layer** — filesystem and network boundaries are hard-coded; misconfigured rules cannot punch through.
-- **Authentication layer** — timing-safe cryptographic comparison; external webhooks require signed verification.
-- **Audit layer** — every action produces a cryptographically chained record; tampering is detectable (see [Audit](#audit) below).
+It is for teams that already want AI in analysis, coordination, and execution, but cannot accept a model directly touching production systems. Security teams can use it for code audit, alert triage, incident response, and audit trails. AI teams can use it to move Agents from demos into real workflows. Lean teams can use it to approach a one-person SOC model, covering more analysis, response, and operations with less headcount.
 
-## Five roles
+The core move is not “add more tools to the model.” CyberClaw separates reasoning, execution, governance, audit, and external integration into explicit boundaries, so automation is built on controlled execution, policy checks, approval paths, and traceable artifacts.
 
-| | |
-|---|---|
-| **Agent** | the actor. Each one has an identity, a trust level, a budget. |
-| **Skill** | how this actor does its work. A "code-review method", an "incident-response playbook". |
-| **Connector** | the bridge to one external system: a database, a wallet, Slack, and so on. |
-| **Capability** | one specific operation: "write a file", "sign a transaction", "send a message". |
-| **Platform Plugin** | a platform-level extension, like exporting audits to an enterprise SIEM. |
+CyberClaw is a general governable Agent platform, with Web3 as its strongest current deployment surface. In environments involving wallets, signers, treasuries, multisig operations, on-chain workflows, and incident handling, governance and execution boundaries are not optional features. They are the starting condition.
 
-## How a single agent action plays out
+### Core Scenarios
 
-When the agent wants to do something — say, "write this report to disk":
+#### Web3-first scenarios
 
-1. **Request**: the agent declares its intent — "I want to call `fs.write`, on file X, with content Y, for reason Z".
-2. **Decision**: the governance engine looks up its rules and decides: allow, deny, or send to a human for approval.
-3. **Execute and record**: on allow, the appropriate Connector runs the action; its output passes through content screening (to block injection attempts); the full chain — request, decision, result — lands in a tamper-evident audit record.
-4. **Audit**: every action produces a row recording who asked for what, what the rule decided, and what the connector returned. Each row is cryptographically linked to the previous so tampering is detectable; the whole chain is verifiable in one command.
+CyberClaw is designed for workflows such as:
 
-## Where it fits
+- treasury and multisig pipelines that require context gathering, approvals, and traceability before execution
+- signer-gated on-chain runbooks where policy, execution, and audit must remain separate
+- protocol operations that unify on-chain actions, external systems, and internal approvals
+- chain incident handling that needs alerts, escalation, response, and auditable follow-up
 
-Three concrete examples — illustrations, not limits:
+#### Other high-stakes scenarios
 
-- **Security operations** — alert volume routinely exceeds analyst capacity, but automation has been stalled by an unwillingness to trust an agent with real action. Under CyberClaw, triage, incident response, and PR risk review run inside policy. "Agent drafts, SOC approves" graduates from demo to production with a full audit chain attached.
-- **DevOps and change management** — release gates, database migrations, and change approvals have always required human gatekeeping. Agents drafting pull requests is common; agents merging them is not. CyberClaw lets the agent run the full migration, generate the change summary, submit for approval, and stop there — producing the operational record that SOX and SOC2 audits will ask for along the way.
-- **Web3** — multisig flows, treasury moves, and on-chain runbooks have lived in operator hands. On CyberClaw, an agent can draft transactions, assemble context, and propose execution; signing authority is gated by governance; every action lands on chain and in the audit ledger simultaneously, unifying on-chain and off-chain evidence.
+The same control model also maps well to:
 
-These three are not the limit. Any setting in which an AI agent interacts with a real system and where mistakes carry real cost is in scope. Architecturally: the agent proposes; the runtime defines boundaries. CyberClaw is the runtime.
+- code audit and PR risk review
+- alert triage, escalation, and incident response
+- release gates, rollback proposals, and change approval
+- governed database queries, writes, transactions, and migrations
 
-## Screenshots
+#### Current repository support
 
-<table>
-<tr>
-  <td><img src="assets/screenshots/tui-chat-idle.png" alt="TUI chat"></td>
-  <td><img src="assets/screenshots/tui-tool-call.png" alt="TUI tool call"></td>
-</tr>
-<tr>
-  <td align="center"><sub>TUI · Chat</sub></td>
-  <td align="center"><sub>TUI · Tool call</sub></td>
-</tr>
-<tr>
-  <td><img src="assets/screenshots/webui-agents-list.png" alt="WebUI agents list"></td>
-  <td><img src="assets/screenshots/webui-trace-detail.png" alt="WebUI trace detail"></td>
-</tr>
-<tr>
-  <td align="center"><sub>WebUI · Agents</sub></td>
-  <td align="center"><sub>WebUI · Trace detail</sub></td>
-</tr>
-<tr>
-  <td><img src="assets/screenshots/webui-memory-browse.png" alt="WebUI memory browser"></td>
-  <td><img src="assets/screenshots/webui-skill-marketplace.png" alt="WebUI skill marketplace"></td>
-</tr>
-<tr>
-  <td align="center"><sub>WebUI · Memory</sub></td>
-  <td align="center"><sub>WebUI · Skill marketplace</sub></td>
-</tr>
-</table>
+The current repository already includes adjacent connectors and references for:
 
-## Quick start
+- GitHub issue / PR / review flows via the GitHub connector example
+- Slack messaging / channel creation / file upload flows via the Slack connector example
+- governed database query / execute / transaction / migration patterns via the database connector example
+- deployment, health-check, and production setup guidance in the deployment docs
+- audit enrichment and security event infrastructure in the platform plugin and observability docs
+
+### Example Governed Flows
+
+These are the kinds of workflows CyberClaw is built to structure:
+
+| Scenario | Example governed flow |
+|--------|---------|
+| Web3 treasury operation | An `Agent` gathers balances, requests, signer context, and policy inputs; a `Skill` turns them into an execution proposal; governance applies approval and policy checks before a wallet-related `Connector` exposes the allowed `Capability`; approvals, traces, and artifacts are recorded. |
+| Code audit / PR risk review | An `Agent` collects pull request context, changed files, and policy inputs; a `Skill` structures the review method; the GitHub `Connector` provides repository collaboration context; MCP capabilities such as `mcp.prompt.code_review` can supply governed review prompts; governance still controls follow-up writes. |
+| Alert triage / escalation | An `Agent` receives an alert, pulls traces, logs, and related repository context, and assembles a triage proposal; Slack `Connector` flows can notify operators, while GitHub `Connector` flows can create follow-up issues; governance constrains risky next steps. |
+| Security incident response | An `Agent` proposes containment, escalation, patch coordination, or investigation steps after triage; governance gates operational changes and external writes; the platform keeps an auditable chain of alerts, approvals, actions, and artifacts. |
+| Release gate / change approval | An `Agent` turns a release task, change request, or production incident into a governed workflow across GitHub and Slack; it can prepare issues, PR context, checklists, and notifications, but only through approved `Connector` and `Capability` boundaries. |
+| Database change gate | An `Agent` analyzes SQL, migration plans, and impact scope before execution; the Database `Connector` exposes bounded capabilities such as `db.query`, `db.execute`, `db.transaction`, and `db.migrate`, each with different risk levels, so governance can require stronger approval and isolation for high-risk changes. |
+
+### Start Here
+
+- [Docs Portal](docs/README.md)
+- [Getting Started](docs/getting-started/README.md)
+- [Builder Guide](docs/builders/README.md)
+- [Security & Governance](docs/security/README.md)
+- [Web3 Guide](docs/web3/README.md)
+- [Skill Hub MVP](docs/business/brand/SKILL_HUB_MVP.md)
+- [I18N Content Strategy](docs/business/brand/I18N_CONTENT_STRATEGY.md)
+
+### Languages
+
+Current repository-facing language support:
+
+- `en` - canonical open-source entry
+- `zh-CN` - maintained localized entry
+
+Planned public site expansion:
+
+- `ja`
+- `ko`
+- `es`
+
+### Who CyberClaw Is For
+
+#### Users and Integrators
+
+- Run agents with explicit execution boundaries
+- Add skills and connectors without bypassing governance
+- Explore Web3 and other high-stakes automation scenarios
+
+#### Ecosystem Builders
+
+- Build and publish Skills, Connectors, and Platform Plugins
+- Reuse the platform's controlled execution model
+- Extend CyberClaw without breaking the five-object boundary
+
+### Quickstart
 
 ```bash
 git clone https://github.com/cyberclawlabs/cyberclaw.git
 cd cyberclaw
-cp .env.example .env       # set LLM_API_KEY and CYBERCLAW_APPROVAL_SECRET
-cargo run -p cyberclaw-server
-# open http://127.0.0.1:38090/admin/v2/
+cargo build
+cargo run -p cyberclaw-cli -- --help
 ```
 
-Production deployment (JWT signing, TLS, multi-replica) is documented in [docs/getting-started](docs/GUIDE.md).
+To inspect the local package surface:
 
-## Supported
+```bash
+cargo run -p cyberclaw-cli -- status
+```
 
-- **LLM providers** — Anthropic, OpenAI, DeepSeek, MiniMax, Volcengine Ark, any OpenAI-compatible endpoint.
-- **External system bridges** — filesystem, HTTP, browser, MCP tool bridge.
-- **Messaging platforms** — Slack, Telegram, Discord, Lark, WeChat, LINE, generic webhook.
-- **Multi-agent coordination** — sub-agent delegation, majority-vote aggregation, multi-model synthesis.
-- **Observability** — trace export compatible with Jaeger, Datadog, Grafana, and other OpenTelemetry endpoints; Prometheus metrics.
-- **Operator console** — React admin UI with login, approval queue, audit viewer, and live chat against any agent; companion CLI.
-- **Deployment modes** — single-node or Raft cluster (multi-replica consistency, task assignment). Distributed approvals across replicas are in roadmap Phase 2.
+### Why CyberClaw
 
-## Roadmap
+- Governable execution instead of unconstrained agent behavior
+- Connector and Capability boundaries for controlled actions
+- Audit, traceability, and observability as first-class concerns
+- Extensible Skill / Connector / Platform Plugin surface
+- Strong fit for Web3 and other high-stakes environments
 
-- **Phase 1 — Usable** (v1.x): the five-role model, declarative governance, audit chain, six messaging platforms, multi-provider LLM, autopilot with circuit breaker. **Shipped.**
-- **Phase 2 — Governed** (v2.x planned): distributed approvals across replicas, enterprise IAM integration, finer-grained permission scope, multi-tenant isolation, compliance templates (SOX / SOC2 / HIPAA).
-- **Phase 3 — Extensible ecosystem** (v3.x planned): third-party Connector / Skill / Plugin registry, signed Skill distribution, shared governance pattern library.
+### Platform Building Blocks
 
-## Contributing
+CyberClaw is organized around five platform objects:
 
-Contributions welcome in:
+| Object | Purpose |
+|--------|---------|
+| `Agent` | Role, orchestration, execution budget |
+| `Skill` | Knowledge, method, prompt, references |
+| `Connector` | Runtime and external system integration |
+| `Capability` | Smallest governed action unit |
+| `Platform Plugin` | Platform-level enhancement hooks |
 
-- New Connectors (messaging platforms, SaaS APIs, internal system bridges)
-- New Skills (vertical-specific methods, prompt templates, knowledge packs)
-- Governance rule templates (for specific business contexts and compliance frameworks)
-- Documentation, examples, case studies
+For external builders, the easiest entry is still:
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+- `Skill`: how the agent should work
+- `Tool` surface: how governed capabilities are exposed externally
 
-## Acknowledgments
+Internally, execution remains bound to the platform chain:
 
-CyberClaw's core architecture draws on a body of academic work and open-source projects.
+`Task/Case -> Resolver -> Execution -> Governance -> Connector -> Capability -> Artifact/Trace`
 
-**Concepts and projects drawn from:**
-- [Anthropic Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — protocol design for tool integration.
-- [OpenTelemetry](https://opentelemetry.io/) — trace format and export conventions.
-- [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent) — closest spiritual peer; benchmarked against for autopilot, scheduled triggers, cross-session memory, sub-agent delegation.
-- [ralph](https://github.com/snarktank/ralph) — persistent "loop until done" pattern; direct ancestor of CyberClaw's PersistentExecution module.
-- [OpenClaw](https://github.com/openclaw/openclaw) and [OpenClaw-RL](https://github.com/Gen-Verse/OpenClaw-RL) — `claw` family lineage, SOUL.md role definition, approval-gate pattern, self-evolution direction.
-- [NanoClaw](https://github.com/qwibitai/nanoclaw) — file-based memory + container-isolation pattern.
-- [IronClaw-NearAI](https://github.com/nearai/ironclaw) — Rust agent with WASM sandbox + policy engine; architectural sibling.
-- [Cline](https://github.com/cline/cline) and [OpenCode](https://github.com/anomalyco/opencode) — human-in-the-loop UX, MCP integration patterns, client/server split.
-- HashiCorp Sentinel / Open Policy Agent — policy-as-code and declarative governance.
-- AWS IAM — capability-based authorization semantics.
+### Web3 Today
 
-**Development harness:** [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) — the multi-agent orchestration layer CyberClaw was developed inside. Skills like `autopilot`, `ralph`, `team`, and `ai-slop-cleaner` drove the v1.2.16 release gates.
+CyberClaw is a general platform. Web3 is currently the strongest scenario for showing why governance, controlled execution, auditability, and risk-aware automation matter.
 
-**Primary dependencies:** Tokio, Axum, Serde, Tracing, Prometheus, subtle, HMAC/SHA-2, Reqwest (Rust side); React, TypeScript, Vite, Tailwind CSS (frontend).
+See [Web3 Guide](docs/web3/README.md).
 
-**Migrated Skill sources.** Some Skills under `ecosystem/skills/` were ported from upstream projects under their Apache-2.0 / MIT licenses; each Skill's `SKILL.md` header records the original source link:
+### Documentation Map
 
-- **obra/superpowers** — `brainstorming`, `test-driven-development`, `subagent-driven-development`, and others
-- **oh-my-claudecode** — `debug`, `plan`, `verify`, `learner`, `skill`, `omc-reference`
-- **NousResearch/hermes-agent** — `daily-digest`, `requesting-code-review`, `spike`, `systematic-debugging`, `writing-plans` (some of which hermes in turn adapted from obra/superpowers and gsd-build/get-shit-done)
-- **anthropics/skills** — `skill-creator`
+- [Docs Index](docs/INDEX.md)
+- [Architecture](docs/architecture/README.md)
+- [Implementation](docs/implementation/README.md)
+- [Business](docs/business/README.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security Policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
 
-Full research background in [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md); academic papers and standards in [CITATIONS.md](CITATIONS.md).
+### Current Status
 
-## Project
+#### Implemented
 
-- **Homepage** — [cyberclawlabs.ai](https://cyberclawlabs.ai)
-- **GitHub** — [github.com/cyberclawlabs/cyberclaw](https://github.com/cyberclawlabs/cyberclaw)
-- **Security and contact** — `info@cyberclawlabs.ai` · see [SECURITY.md](SECURITY.md)
+- Core platform crates and runtime layers
+- Governance, observability, and isolation foundations
+- CLI and server entry points
+- Architecture and implementation documentation base
 
-## License
+#### In Progress
 
-Apache-2.0
+- Public-facing product docs reshaping
+- Open-source launch surface refinement
+- Skill Hub discovery surface design
+
+#### Roadmap
+
+- Dedicated GitHub Pages homepage at `cyberclawlabs.ai`
+- Independent Skill Hub experience
+- Expanded builder-facing ecosystem workflows
+
+### Contact
+
+- Public contact: `info@cyberclawlabs.ai`
+
+Do not use this README as the sole source of implementation truth. For current implementation reality, combine code, tests, implementation reports, and review records.

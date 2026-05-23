@@ -24,6 +24,7 @@ pub mod plugin_registry;
 /// portability-tier report (Tier1/Tier2/Tier3) with capability extraction.
 pub mod portability_verifier;
 pub mod runtime;
+pub mod skill_binder;
 pub mod skill_executor;
 pub mod skill_hub;
 pub mod skill_packager;
@@ -44,6 +45,7 @@ pub use loaders::{
 pub use mock::MockSkillRuntime;
 pub use plugin_registry::{PluginDeclaration, PluginRegistry};
 pub use runtime::{MinimalSkillRuntime, SkillRuntime, SkillRuntimeConfig};
+pub use skill_binder::{parse_manifest_auto_bind, AutoBindRule, SkillBinder};
 pub use skill_scanner::{
     ScanFinding, ScanResult, ScanSeverity, ScanVerdict, SkillScanner, SkillTrustLevel,
     ThreatCategory,
@@ -64,6 +66,7 @@ pub mod prelude {
     pub use crate::mock::MockSkillRuntime;
     pub use crate::plugin_registry::{PluginDeclaration, PluginRegistry};
     pub use crate::runtime::{MinimalSkillRuntime, SkillRuntime, SkillRuntimeConfig};
+    pub use crate::skill_binder::{parse_manifest_auto_bind, AutoBindRule, SkillBinder};
     pub use crate::skill_scanner::{
         ScanFinding, ScanResult, ScanSeverity, ScanVerdict, SkillScanner, SkillTrustLevel,
         ThreatCategory,

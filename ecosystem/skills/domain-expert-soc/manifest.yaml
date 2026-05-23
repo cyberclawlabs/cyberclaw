@@ -1,0 +1,76 @@
+apiVersion: cyberclaw.io/v2
+kind: Skill
+id: cyberclaw/domain-expert-soc
+version: 0.1.0
+name: domain-expert-soc
+displayName: Domain Expert — SOC / Incident Response
+summary: SOC analyst & IR commander operating procedures — MITRE ATT&CK mapping, SIEM correlation, IR phases (NIST SP 800-61), IOC analysis, kill chain reasoning, forensic chain-of-custody, DLP rules.
+owner: CyberClaw
+license: Apache-2.0
+tags:
+  - domain-expert
+  - soc
+  - incident-response
+  - blue-team
+compatibility:
+  platform: cyberclaw
+  runtime:
+    - native
+artifacts:
+  entry: SKILL.md
+  files:
+    - SKILL.md
+    - references/mitre-attack-quick.md
+    - references/ir-playbook.md
+spec:
+  format: claude-compatible
+  entryFile: SKILL.md
+  referencesDir: references
+  # Single-group OR matcher. SOC asks usually touch ONE axis (an alert, a
+  # phish, an IR plan) — requiring two axes loses too many true positives.
+  # Compensated by tight, distinctive keywords.
+  auto_bind:
+    keywords:
+      - any:
+          - SOC
+          - SIEM
+          - "blue team"
+          - "blue-team"
+          - "IR plan"
+          - "IR commander"
+          - "incident response"
+          - "incident-response"
+          - "kill chain"
+          - "MITRE"
+          - "ATT&CK"
+          - forensic
+          - "chain of custody"
+          - DLP
+          - "SSH login"
+          - "failed login"
+          - "HTTP 401"
+          - "brute force"
+          - malware
+          - ransomware
+          - phishing
+          - exfiltration
+          - "lateral movement"
+          - "privilege escalation"
+          - "privesc"
+          - IOC
+          - "indicator of compromise"
+          - LSASS
+          - mimikatz
+          - Kerberoasting
+          - "C2"
+          - "data exfiltration"
+          - "data exfil"
+          - "S3 bucket"
+          - "misconfigured S3"
+          - "PII"
+          - GDPR
+          - CCPA
+          - HIPAA
+          - "regulator notification"
+          - "incident commander"
+    priority: 80

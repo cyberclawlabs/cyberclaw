@@ -1,0 +1,118 @@
+# Ethereum Wallet Connector — example configuration
+#
+# 这个 connector 把 EVM 链 (Ethereum / Arbitrum / Optimism / Base / Polygon …)
+# 的钱包操作以分级 Capability 的形式接入 CyberClaw 治理链。
+#
+# 关键设计：读 / 模拟 / 签名 / 广播 是四个独立的 Capability，分别对应 Low /
+# Low / Critical / Critical 四个风险等级。Agent 永远不能"一次过"完成签名 +
+# 广播；治理链会按 capability 粒度拦截、要求审批、留痕。
+
+[connector]
+id          = "wallet-eth"
+name        = "Ethereum Wallet Connector"
+version     = "1.0.0"
+description = "EVM wallet ops: balance query, tx simulation, signing, broadcasting — every side effect goes through a separate Capability"
+runtime     = "native"
+subtype     = "web3.evm.wallet"
+
+# ──────────────────────────────────────────────────────────────────────
+# 网络
+# ──────────────────────────────────────────────────────────────────────
+[connector.network]
+chain_id          = "${CHAIN_ID:-1}"     # 1 = mainnet, 11155111 = sepolia, 8453 = base, …
+rpc_url           = "${ETH_RPC_URL}"     # 必填。建议私有节点或受信 RPC
+fallback_rpc_urls = []                   # 可选 failover
+finality          = "safe"               # latest | safe | finalized；写操作建议 safe 或 finalized
+chain_label       = "${CHAIN_LABEL:-mainnet}"
+
+# ──────────────────────────────────────────────────────────────────────
+# 认证 / 签名
+# ──────────────────────────────────────────────────────────────────────
+[auth]
+# 这个 connector 自己不存私钥。签名调用 signer-vault connector
+# (ecosystem/connectors/signer-vault-example)，由 vault 持有 keystore /
+# HSM / cloud KMS / 硬件钱包。
+type      = "signer"
+signer_id = "${WALLET_SIGNER_ID}"        # 在 signer-vault connector 中注册的 signer
+
+# ──────────────────────────────────────────────────────────────────────
+# 速率
+# ──────────────────────────────────────────────────────────────────────
+[rate_limit]
+permits_per_minute = 60                  # 单链 RPC 流控
+
+# ──────────────────────────────────────────────────────────────────────
+# 能力（按风险分级；治理链会按 risk 决定 Allow / Ask / Deny）
+# ──────────────────────────────────────────────────────────────────────
+
+# 读类（Low risk）—— 不产生副作用
+[[capabilities]]
+id          = "wallet.eth.balance"
+description = "Query native ETH or ERC-20 balance for an address"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "wallet.eth.contract.read"
+description = "Call a read-only (view/pure) contract method via eth_call"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "wallet.eth.tx.simulate"
+description = "Dry-run a transaction with eth_call + estimate gas; never broadcasts"
+enabled     = true
+risk        = "Low"
+
+[[capabilities]]
+id          = "wallet.eth.gas.suggest"
+description = "Return base fee + priority fee suggestion (EIP-1559)"
+enabled     = true
+risk        = "Low"
+
+# 签名类（Critical risk）—— 治理链强制审批
+[[capabilities]]
+id                  = "wallet.eth.tx.sign"
+description         = "Sign an EIP-1559 transaction envelope with the configured signer. Does NOT broadcast."
+enabled             = true
+risk                = "Critical"
+required_approvals  = 1
+input_caps = { max_value_wei = "${MAX_TX_VALUE_WEI:-1000000000000000000}", allowed_to_addresses = "${ALLOWED_TO_LIST}" }
+
+[[capabilities]]
+id                  = "wallet.eth.message.sign"
+description         = "Sign an EIP-191 personal_sign message"
+enabled             = true
+risk                = "High"
+required_approvals  = 1
+
+[[capabilities]]
+id                  = "wallet.eth.typeddata.sign"
+description         = "Sign EIP-712 typed data (e.g., Permit, off-chain orders)"
+enabled             = true
+risk                = "High"
+required_approvals  = 1
+
+# 广播类（Critical risk）—— 副作用真正发生的边界
+[[capabilities]]
+id                  = "wallet.eth.tx.broadcast"
+description         = "Submit a pre-signed raw transaction to the configured RPC. Side effects start HERE."
+enabled             = true
+risk                = "Critical"
+required_approvals  = 1
+
+[[capabilities]]
+id                  = "wallet.eth.tx.cancel"
+description         = "Replace a pending tx with a higher-fee zero-value self-send to cancel it"
+enabled             = false               # 默认关闭，按需启用
+risk                = "High"
+
+# ──────────────────────────────────────────────────────────────────────
+# 高级
+# ──────────────────────────────────────────────────────────────────────
+[advanced]
+default_timeout_ms       = 15000
+max_retries              = 3
+retry_backoff_ms         = 1500
+mempool_replacement_bump_pct = 12        # gas-price replacement bump
+require_simulation_before_broadcast = true   # 强制：广播前必须先 simulate

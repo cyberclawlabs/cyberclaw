@@ -11,6 +11,7 @@ pub mod builtin;
 pub mod cluster;
 pub mod contract;
 pub mod database_connector;
+pub mod dispatch_interceptor;
 pub mod dispatcher;
 pub mod error_sanitizer;
 pub mod github_connector;
@@ -56,6 +57,10 @@ pub use database_connector::{
     DatabaseConnector, DatabasePool, DatabaseType, DbExecuteInput, DbExecuteOutput, DbMigrateInput,
     DbMigrateOutput, DbMigration, DbQueryInput, DbQueryOutput, DbTransactionInput,
     DbTransactionOutput,
+};
+pub use dispatch_interceptor::{
+    DispatchCtx, DispatchInterceptor, SandboxInjectionInterceptor,
+    TruncationMetadataInterceptor, WallClockInterceptor,
 };
 pub use dispatcher::CapabilityDispatcher;
 pub use github_connector::{Authenticator, Credentials, GitHubAuth, GitHubConnector, RateLimiter};
