@@ -135,6 +135,7 @@ impl LlmClient for ArkClient {
             tool_choice: None,
             stream: None,
             extra: Default::default(),
+            api_key_override: None,
         };
 
         // 只验证认证是否通过，不关心具体返回

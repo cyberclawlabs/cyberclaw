@@ -171,6 +171,7 @@ impl From<ChatCompletionRequest> for ChatRequest {
             // ChatCompletionRequest side and consumed by the approval
             // endpoint + audit trail.
             extra: Default::default(),
+            api_key_override: None,
         }
     }
 }
@@ -690,23 +691,23 @@ async fn chat_completions(
         // web_search is intercepted inline in execute_tool_calls but not in
         // any facade — add a synthetic definition so the LLM knows about it.
         if seen.insert("web_search".to_string()) {
-        palette.push(ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "web_search".to_string(),
-                description: "Search the web via DuckDuckGo Instant Answer. \
+            palette.push(ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "web_search".to_string(),
+                    description: "Search the web via DuckDuckGo Instant Answer. \
                               Use for current events / facts the model can't know."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search query string" }
-                    },
-                    "required": ["query"]
-                }),
-            },
-            cache_control: None,
-        });
+                        .to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string", "description": "Search query string" }
+                        },
+                        "required": ["query"]
+                    }),
+                },
+                cache_control: None,
+            });
         }
         if !palette.is_empty() {
             req.tools = Some(palette);
@@ -1357,9 +1358,7 @@ async fn handle_stream_completion(
 /// Fallback for web_search: scrape html.duckduckgo.com result page.
 /// Handles person names / news / niche queries where IA returns empty.
 /// Returns up to 5 result entries each with title/url/snippet.
-async fn ddg_html_fallback(
-    query: &str,
-) -> Result<Vec<serde_json::Value>, reqwest::Error> {
+async fn ddg_html_fallback(query: &str) -> Result<Vec<serde_json::Value>, reqwest::Error> {
     let body = reqwest::Client::new()
         .post("https://html.duckduckgo.com/html/")
         .header("User-Agent", "Mozilla/5.0 cyberclaw/1.2.0")
@@ -1388,9 +1387,7 @@ async fn ddg_html_fallback(
         };
         let title = strip_html(&after_close[..title_end]).trim().to_string();
 
-        let snippet = match after_close[title_end..]
-            .find("class=\"result__snippet\"")
-        {
+        let snippet = match after_close[title_end..].find("class=\"result__snippet\"") {
             Some(s_off) => {
                 let snippet_after = &after_close[title_end + s_off..];
                 if let Some(gt) = snippet_after.find('>') {
@@ -1482,9 +1479,7 @@ async fn execute_tool_calls(
         // (no API key required). Skips tool_mapper since this isn't a
         // connector-backed capability. v1.2 follow-up: promote to proper
         // capability registered via a Web connector.
-        if tool_call.function.name == "web_search"
-            || tool_call.function.name == "search"
-        {
+        if tool_call.function.name == "web_search" || tool_call.function.name == "search" {
             let args: serde_json::Value =
                 serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
             let query = args
@@ -2103,6 +2098,7 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
             }],
             usage: None,
+            rate_limit: None,
         };
         let stream = chunked_fallback_sse(resp);
         futures::pin_mut!(stream);
@@ -2152,6 +2148,7 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
             }],
             usage: None,
+            rate_limit: None,
         };
         let stream = chunked_fallback_sse(resp);
         futures::pin_mut!(stream);

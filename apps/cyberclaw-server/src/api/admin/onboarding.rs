@@ -530,6 +530,7 @@ pub async fn onboarding_test_llm(
         tool_choice: None,
         top_p: None,
         extra: std::collections::HashMap::new(),
+        api_key_override: None,
     };
 
     let start = Instant::now();

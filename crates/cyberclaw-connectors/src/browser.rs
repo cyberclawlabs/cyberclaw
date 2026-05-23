@@ -707,17 +707,12 @@ impl<T: CdpTransport + Send> CdpClient<T> {
         } else {
             // No page exists — create a blank one. Standard CDP per the spec.
             let created = self
-                .send_command(
-                    "Target.createTarget",
-                    json!({ "url": "about:blank" }),
-                )
+                .send_command("Target.createTarget", json!({ "url": "about:blank" }))
                 .await?;
             created
                 .get("targetId")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Target.createTarget did not return targetId")
-                })?
+                .ok_or_else(|| anyhow::anyhow!("Target.createTarget did not return targetId"))?
                 .to_string()
         };
         let attach = self

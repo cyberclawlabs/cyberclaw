@@ -36,17 +36,28 @@
 //! ```
 
 pub mod client;
+pub mod credential_pool;
 pub mod embed;
 pub mod error;
+pub mod failover_reason;
 pub mod mixture_of_agents;
+pub mod pricing;
+pub mod provider_chain;
 pub mod providers;
+pub mod rate_limit_tracker;
 pub mod types;
 
 // Re-export 核心类型
 pub use client::LlmClient;
+pub use credential_pool::{CredentialPool, CredentialStats, SelectionStrategy};
 pub use embed::{EmbedClient, NoopEmbedClient, OpenAiCompatEmbedClient};
 pub use error::{LlmError, LlmResult};
 pub use mixture_of_agents::{MixtureOfAgents, MoAResult, Proposal};
+pub use pricing::{
+    estimate_cost, lookup_pricing, CanonicalUsage, CostAccumulator, CostResult, ModelCost,
+    PricingEntry,
+};
+pub use rate_limit_tracker::RateLimitSnapshot;
 pub use types::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, Delta, FunctionCall,
     FunctionDefinition, Message, Role, ToolCall, ToolDefinition, Usage,
@@ -60,6 +71,7 @@ pub mod prelude {
         anthropic::AnthropicClient, ark::ArkClient, generic::GenericOpenAiClient,
         openai::OpenAiClient, LlmProvider,
     };
+    pub use crate::rate_limit_tracker::RateLimitSnapshot;
     pub use crate::types::{
         ChatChunk, ChatRequest, ChatResponse, Choice, FunctionCall, FunctionDefinition, Message,
         Role, ToolCall, ToolDefinition, Usage,

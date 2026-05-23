@@ -81,8 +81,7 @@ pub fn parse_dsml_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
             };
             let body = &rest[body_start..body_start + close_at_rel];
             let args = parse_parameters_with(body, &d);
-            let args_json =
-                serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+            let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
             calls.push(ToolCall {
                 id: format!("{}-{}", d.id_prefix, idx),
                 call_type: "function".to_string(),
@@ -193,7 +192,8 @@ fn parse_parameters_with(body: &str, d: &Dialect) -> serde_json::Map<String, Val
             Value::String(raw_val.trim().to_string())
         } else {
             // try number / bool / json, fallback to string
-            serde_json::from_str(raw_val.trim()).unwrap_or_else(|_| Value::String(raw_val.trim().to_string()))
+            serde_json::from_str(raw_val.trim())
+                .unwrap_or_else(|_| Value::String(raw_val.trim().to_string()))
         };
         map.insert(name, val);
 

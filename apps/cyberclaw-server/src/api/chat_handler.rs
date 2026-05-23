@@ -36,13 +36,13 @@ use uuid::Uuid;
 use cyberclaw_agent_runtime::agentic_loop::{
     AgenticLoop, DefaultAgenticLoop, IterationResult, LoopConfig,
 };
+use cyberclaw_agent_runtime::builtin_tools::{BuiltinToolRegistry, ToolsetConfig};
+use cyberclaw_agent_runtime::memory_integration::MemoryIntegration;
+use cyberclaw_agent_runtime::tool_description::CapabilityFacade;
 use cyberclaw_agent_runtime::{
     AgenticLoopGovernor, GovernorConfig, JsonStructureVerifier, LoopProfile, RegexAssertVerifier,
     VerifierChain,
 };
-use cyberclaw_agent_runtime::builtin_tools::{BuiltinToolRegistry, ToolsetConfig};
-use cyberclaw_agent_runtime::memory_integration::MemoryIntegration;
-use cyberclaw_agent_runtime::tool_description::CapabilityFacade;
 use cyberclaw_core::execution::ExecutionMode;
 use cyberclaw_core::gateway::{CapabilityRequest, OrchestratorGateway};
 use cyberclaw_core::ids::{ExecutionId, SessionId};
@@ -292,6 +292,33 @@ pub(crate) enum StreamFrame {
     },
     /// Terminal error. Loop aborted; the next frame after this is `Done`.
     ErrorMsg { message: String, kind: String },
+    /// Rate-limit snapshot from the last LLM call. Emitted once just before
+    /// `Done` when the provider returned `x-ratelimit-*` response headers.
+    /// CLI clients that do not recognise this frame type skip it (Unknown).
+    RateLimit {
+        provider: String,
+        requests_limit: Option<u64>,
+        requests_remaining: Option<u64>,
+        tokens_limit: Option<u64>,
+        tokens_remaining: Option<u64>,
+        requests_reset_secs: Option<f64>,
+        tokens_reset_secs: Option<f64>,
+    },
+    /// Token usage snapshot emitted once just before `Done`.
+    /// CLI clients use this to compute per-session cost estimates.
+    /// Clients that do not recognise this frame type skip it (Unknown).
+    Usage {
+        /// LLM model name used for this session.
+        model: String,
+        /// Input tokens consumed (excludes cache tokens).
+        input_tokens: u64,
+        /// Output tokens generated.
+        output_tokens: u64,
+        /// Cache read tokens (Anthropic-style).
+        cache_read_tokens: u64,
+        /// Cache write tokens (Anthropic-style).
+        cache_write_tokens: u64,
+    },
     /// Stream terminator. Maps to the literal `data: [DONE]\n\n` frame.
     Done,
 }
@@ -336,6 +363,48 @@ fn stream_frame_to_sse_event(frame: &StreamFrame) -> SseEvent {
         StreamFrame::ErrorMsg { message, kind } => {
             let payload = serde_json::json!({
                 "error": {"message": message, "type": kind},
+            });
+            SseEvent::default().data(payload.to_string())
+        }
+        StreamFrame::RateLimit {
+            provider,
+            requests_limit,
+            requests_remaining,
+            tokens_limit,
+            tokens_remaining,
+            requests_reset_secs,
+            tokens_reset_secs,
+        } => {
+            let payload = serde_json::json!({
+                "type": "rate_limit",
+                "rate_limit": {
+                    "provider": provider,
+                    "requests_limit": requests_limit,
+                    "requests_remaining": requests_remaining,
+                    "tokens_limit": tokens_limit,
+                    "tokens_remaining": tokens_remaining,
+                    "requests_reset_secs": requests_reset_secs,
+                    "tokens_reset_secs": tokens_reset_secs,
+                }
+            });
+            SseEvent::default().data(payload.to_string())
+        }
+        StreamFrame::Usage {
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        } => {
+            let payload = serde_json::json!({
+                "type": "usage",
+                "usage": {
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_read_tokens": cache_read_tokens,
+                    "cache_write_tokens": cache_write_tokens,
+                }
             });
             SseEvent::default().data(payload.to_string())
         }
@@ -820,7 +889,12 @@ pub async fn agent_chat_completions(
         let already_bound: Vec<String> = agentic_loop
             .active_skill_bindings()
             .iter()
-            .map(|s| s.as_str().strip_prefix("sk_").unwrap_or(s.as_str()).to_string())
+            .map(|s| {
+                s.as_str()
+                    .strip_prefix("sk_")
+                    .unwrap_or(s.as_str())
+                    .to_string()
+            })
             .collect();
         let last_user_msg = req
             .messages
@@ -834,11 +908,9 @@ pub async fn agent_chat_completions(
                 let hub = state.skill_hub.read().await;
                 hub.base_dir().join("installed")
             };
-            let extras =
-                auto_bind_extra_skills(&installed_dir, last_user_msg, &already_bound);
+            let extras = auto_bind_extra_skills(&installed_dir, last_user_msg, &already_bound);
             if !extras.is_empty() {
-                let extra_names: Vec<&str> =
-                    extras.iter().map(|(n, _)| n.as_str()).collect();
+                let extra_names: Vec<&str> = extras.iter().map(|(n, _)| n.as_str()).collect();
                 info!(
                     request_id = %request_id,
                     auto_bound = ?extra_names,
@@ -1217,7 +1289,12 @@ async fn agent_chat_completions_streaming(
         let already_bound: Vec<String> = agentic_loop
             .active_skill_bindings()
             .iter()
-            .map(|s| s.as_str().strip_prefix("sk_").unwrap_or(s.as_str()).to_string())
+            .map(|s| {
+                s.as_str()
+                    .strip_prefix("sk_")
+                    .unwrap_or(s.as_str())
+                    .to_string()
+            })
             .collect();
         let last_user_msg = req
             .messages
@@ -1231,11 +1308,9 @@ async fn agent_chat_completions_streaming(
                 let hub = state.skill_hub.read().await;
                 hub.base_dir().join("installed")
             };
-            let extras =
-                auto_bind_extra_skills(&installed_dir, last_user_msg, &already_bound);
+            let extras = auto_bind_extra_skills(&installed_dir, last_user_msg, &already_bound);
             if !extras.is_empty() {
-                let extra_names: Vec<&str> =
-                    extras.iter().map(|(n, _)| n.as_str()).collect();
+                let extra_names: Vec<&str> = extras.iter().map(|(n, _)| n.as_str()).collect();
                 info!(
                     request_id = %request_id,
                     auto_bound = ?extra_names,
@@ -1385,6 +1460,32 @@ async fn agent_chat_completions_streaming(
                     }
                 }
 
+                // Emit rate-limit snapshot from the last LLM call (if any).
+                if let Some(rl) = summary.last_rate_limit {
+                    let _ = tx_for_task.send(StreamFrame::RateLimit {
+                        provider: rl.provider,
+                        requests_limit: rl.requests_limit,
+                        requests_remaining: rl.requests_remaining,
+                        tokens_limit: rl.tokens_limit,
+                        tokens_remaining: rl.tokens_remaining,
+                        requests_reset_secs: rl.requests_reset_secs,
+                        tokens_reset_secs: rl.tokens_reset_secs,
+                    });
+                }
+
+                // Emit token usage snapshot for client-side cost estimation.
+                // LoopSummary.tokens_used is the aggregate across all iterations
+                // (prompt + completion combined). We emit it as input_tokens
+                // since we cannot split prompt vs completion at this level;
+                // clients use this for rough cost estimation only.
+                let _ = tx_for_task.send(StreamFrame::Usage {
+                    model: model_for_task.clone(),
+                    input_tokens: summary.tokens_used,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                });
+
                 let _ = tx_for_task.send(StreamFrame::Done);
             }
             Err(api_err) => {
@@ -1410,10 +1511,9 @@ async fn agent_chat_completions_streaming(
     // `StreamFrame` is serialised by `stream_frame_to_sse_event`. We wrap
     // with `Sse::new` + `KeepAlive` so proxies / load balancers (15 s default
     // is conservative) don't reap the connection mid-loop.
-    let sse_stream =
-        UnboundedReceiverStream::new(rx).map(|frame: StreamFrame| {
-            Ok::<SseEvent, std::convert::Infallible>(stream_frame_to_sse_event(&frame))
-        });
+    let sse_stream = UnboundedReceiverStream::new(rx).map(|frame: StreamFrame| {
+        Ok::<SseEvent, std::convert::Infallible>(stream_frame_to_sse_event(&frame))
+    });
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -3884,6 +3984,7 @@ mod tests {
                         finish_reason: Some("stop".to_string()),
                     }],
                     usage: None,
+                    rate_limit: None,
                 })
             }
             async fn chat_completion_stream(

@@ -1,3 +1,4 @@
+use crate::rate_limit_tracker::RateLimitSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -209,6 +210,14 @@ pub struct ChatRequest {
     /// 额外参数（提供商特定）
     #[serde(flatten, default)]
     pub extra: HashMap<String, serde_json::Value>,
+    /// Credential pool key override (not serialized to provider).
+    ///
+    /// Set by `RetryProvider` when a `CredentialPool` is attached and a
+    /// rotation-triggering error occurs.  Providers that support per-request
+    /// key injection (e.g. future `PooledAnthropicClient`) read this field
+    /// instead of their default key.  Standard providers ignore it.
+    #[serde(skip)]
+    pub api_key_override: Option<String>,
 }
 
 /// 聊天响应
@@ -227,6 +236,13 @@ pub struct ChatResponse {
     /// 使用情况
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Rate-limit headers captured from the provider response.
+    ///
+    /// `None` when the provider did not return any `x-ratelimit-*` headers
+    /// (e.g. local Ollama, generic proxies) or when the response was
+    /// deserialized from a cached / stored value that predates this field.
+    #[serde(skip)]
+    pub rate_limit: Option<RateLimitSnapshot>,
 }
 
 /// 选择

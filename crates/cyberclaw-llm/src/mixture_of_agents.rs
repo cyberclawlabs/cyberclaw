@@ -260,6 +260,7 @@ mod tests {
                     total_tokens: 20,
                     ..Default::default()
                 }),
+                rate_limit: None,
             })
         }
         async fn chat_completion_stream(

@@ -42,6 +42,7 @@ use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 
 use crate::commands::chat::{handle_slash, send_message_tui, ClarifyPayload, SlashResult};
+use cyberclaw_core::i18n::t;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -163,6 +164,18 @@ fn build_prompt_line<'a>(
     Line::from(spans)
 }
 
+/// Rate-limit snapshot received from the server via SSE.
+#[derive(Debug, Clone)]
+pub struct RateLimitInfo {
+    pub provider: String,
+    pub requests_limit: Option<u64>,
+    pub requests_remaining: Option<u64>,
+    pub tokens_limit: Option<u64>,
+    pub tokens_remaining: Option<u64>,
+    pub requests_reset_secs: Option<f64>,
+    pub tokens_reset_secs: Option<f64>,
+}
+
 /// TUI 主循环接收的异步事件
 #[derive(Debug)]
 pub enum TokenEvent {
@@ -170,6 +183,10 @@ pub enum TokenEvent {
     Done,
     Error(String),
     Clarify(ClarifyPayload),
+    /// Rate-limit snapshot from the last LLM call.
+    RateLimit(RateLimitInfo),
+    /// Token usage snapshot for cost estimation.
+    Usage(crate::commands::chat::SseUsage),
     /// SSE 推送的审批请求（构造侧由服务端 SSE stream 触发，客户端 match arm 已就绪）
     #[allow(dead_code)]
     ApprovalRequest(ApprovalCtx),
@@ -283,6 +300,11 @@ struct TuiApp<'a> {
     /// 是否显示 tool block / DSML 摘要等非内容 detail 行。
     /// `/details` 切换；与 `show_thinking` 一起表示完整的"细节可见性"。
     show_tool_details: bool,
+    /// Most recent rate-limit snapshot received from the server.
+    /// Updated on every response that carries `x-ratelimit-*` headers.
+    last_rate_limit: Option<RateLimitInfo>,
+    /// Session-level cost accumulator fed by server `usage` SSE frames.
+    cost_accumulator: cyberclaw_llm::CostAccumulator,
 }
 
 impl<'a> TuiApp<'a> {
@@ -317,6 +339,8 @@ impl<'a> TuiApp<'a> {
             pending_retry: None,
             input_queue: Vec::new(),
             show_tool_details: true,
+            last_rate_limit: None,
+            cost_accumulator: cyberclaw_llm::CostAccumulator::default(),
         }
     }
 
@@ -469,7 +493,10 @@ impl<'a> TuiApp<'a> {
              \x20 agent:  {}\n\n\
              \x20 键位：Enter 发送 · Shift+Enter 换行 · Ctrl+C 退出\n\
              \x20 斜杠：/help · /sessions · /skills · /agents · /trace · /history",
-            env!("CARGO_PKG_VERSION"), conv_short, self.model, agent_display
+            env!("CARGO_PKG_VERSION"),
+            conv_short,
+            self.model,
+            agent_display
         );
         self.history.push(MessageBlock {
             role: "banner".to_string(),
@@ -793,11 +820,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                         .fg(COLOR_ACCENT)
                         .add_modifier(Modifier::BOLD),
                 ),
-                _ => (
-                    "·",
-                    "system",
-                    Style::default().fg(COLOR_MUTED),
-                ),
+                _ => ("·", "system", Style::default().fg(COLOR_MUTED)),
             };
             let ts = block.ts.format("%H:%M:%S").to_string();
             let mut header_spans = vec![
@@ -808,8 +831,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
             ];
             if block.streaming {
                 // braille 旋转，与 prompt spinner 同节奏（每 5 tick = 250ms 切帧）
-                let frame =
-                    SPINNER_FRAMES[((app.pulse_tick / 5) as usize) % SPINNER_FRAMES.len()];
+                let frame = SPINNER_FRAMES[((app.pulse_tick / 5) as usize) % SPINNER_FRAMES.len()];
                 header_spans.push(Span::raw(" "));
                 header_spans.push(Span::styled(
                     frame.to_string(),
@@ -1005,10 +1027,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                     Line::from(vec![
                         Span::styled(marker, Style::default().fg(COLOR_ACCENT)),
                         Span::styled(format!("{:<22}", cmd), cmd_style),
-                        Span::styled(
-                            desc.to_string(),
-                            Style::default().fg(COLOR_BORDER),
-                        ),
+                        Span::styled(desc.to_string(), Style::default().fg(COLOR_BORDER)),
                     ])
                 })
                 .collect();
@@ -1124,7 +1143,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                     Line::from(vec![Span::raw(format!("  {}", ctx.description))]),
                     Line::raw(""),
                     Line::styled(
-                        "  Press  y  to approve,  n  to deny",
+                        format!("  {}  (y/n)", t("approval.prompt")),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ];
@@ -1304,8 +1323,14 @@ const SLASH_HELP: &[(&str, &str)] = &[
     ("/quit", "退出 TUI"),
     ("/history [file]", "导出当前会话为 markdown（同 /save）"),
     ("/token", "显示估算的 token 使用量（粗略）"),
-    ("/usage", "详细用量：tokens / 消息数 / context 占比 / 当前 model"),
-    ("/undo", "从本地 transcript 移除最近一对消息（不动 server 会话）"),
+    (
+        "/usage",
+        "详细用量：tokens / 消息数 / context 占比 / 当前 model",
+    ),
+    (
+        "/undo",
+        "从本地 transcript 移除最近一对消息（不动 server 会话）",
+    ),
     ("/trace", "切换 <think> 思考块的显示/隐藏"),
     ("/retry", "重发上一轮 user message（来自本地 transcript）"),
     ("/queue", "查看 streaming 期间排队的输入"),
@@ -1436,10 +1461,8 @@ pub async fn run_tui(
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             let _ = crossterm::terminal::disable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::LeaveAlternateScreen
-            );
+            let _ =
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
             std::process::exit(0);
         }
     });
@@ -1609,6 +1632,18 @@ pub async fn run_tui(
                 Ok(TokenEvent::ApprovalRequest(ctx)) => {
                     app.overlay = OverlayState::Approval(ctx);
                 }
+                Ok(TokenEvent::RateLimit(rl)) => {
+                    app.last_rate_limit = Some(rl);
+                }
+                Ok(TokenEvent::Usage(u)) => {
+                    let usage = cyberclaw_llm::CanonicalUsage {
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                        cache_read_tokens: u.cache_read_tokens,
+                        cache_write_tokens: u.cache_write_tokens,
+                    };
+                    app.cost_accumulator.add_response(&u.model, &usage);
+                }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => break,
             }
@@ -1629,8 +1664,7 @@ pub async fn run_tui(
             if first_message {
                 first_message = false;
                 let title: String = text.chars().take(40).collect();
-                let patch_url =
-                    format!("{}/api/v1/chat/conversations/{}", server, conv_id);
+                let patch_url = format!("{}/api/v1/chat/conversations/{}", server, conv_id);
                 let _ = client
                     .patch(&patch_url)
                     .bearer_auth(&token)
@@ -1901,16 +1935,8 @@ async fn handle_slash_tui(
             // context-window guess so the operator can see how close the
             // current session is to needing /compress.
             let total_msgs = app.history.len();
-            let user_msgs = app
-                .history
-                .iter()
-                .filter(|m| m.role == "user")
-                .count();
-            let assistant_msgs = app
-                .history
-                .iter()
-                .filter(|m| m.role == "assistant")
-                .count();
+            let user_msgs = app.history.iter().filter(|m| m.role == "user").count();
+            let assistant_msgs = app.history.iter().filter(|m| m.role == "assistant").count();
             // Conservative ceiling — most modern models we ship advertise
             // 128k tokens. We do NOT introspect the model's real cap here
             // because that would need a metadata round-trip to the server
@@ -1928,6 +1954,49 @@ async fn handle_slash_tui(
                 pct,
                 current_model,
             ));
+            // Hermes Gap 3.2 — rate limit readout from provider response headers.
+            match &app.last_rate_limit {
+                None => {
+                    app.push_system("[usage] Rate limit: provider did not report".to_string());
+                }
+                Some(rl) => {
+                    let req_line = match (rl.requests_remaining, rl.requests_limit) {
+                        (Some(rem), Some(lim)) => {
+                            let used = lim.saturating_sub(rem);
+                            let pct = (used * 100).checked_div(lim).unwrap_or(0);
+                            let reset_str = rl
+                                .requests_reset_secs
+                                .map(|s| format!("  reset in {:.0}s", s))
+                                .unwrap_or_default();
+                            format!("  Requests: {}/{} RPM ({}%){reset_str}", used, lim, pct)
+                        }
+                        _ => "  Requests: not reported".to_string(),
+                    };
+                    let tok_line = match (rl.tokens_remaining, rl.tokens_limit) {
+                        (Some(rem), Some(lim)) => {
+                            let used = lim.saturating_sub(rem);
+                            let pct = (used * 100).checked_div(lim).unwrap_or(0);
+                            let reset_str = rl
+                                .tokens_reset_secs
+                                .map(|s| format!("  reset in {:.0}s", s))
+                                .unwrap_or_default();
+                            let used_k = used as f64 / 1000.0;
+                            let lim_k = lim as f64 / 1000.0;
+                            format!(
+                                "  Tokens:   {:.1}k/{:.1}k TPM ({}%){reset_str}",
+                                used_k, lim_k, pct
+                            )
+                        }
+                        _ => "  Tokens:   not reported".to_string(),
+                    };
+                    app.push_system(format!(
+                        "[usage] Rate limit ({}):\n{}\n{}",
+                        rl.provider, req_line, tok_line
+                    ));
+                }
+            }
+            // Cost estimation (Gap 3.1)
+            app.push_system(app.cost_accumulator.summary());
         }
         "/undo" => {
             // Hermes parity: drop the most recent assistant+user pair from
@@ -1939,19 +2008,11 @@ async fn handle_slash_tui(
             let mut removed = 0usize;
             // Strip a trailing assistant turn first (it might be mid-stream),
             // then strip the user turn that elicited it.
-            if app
-                .history
-                .last()
-                .is_some_and(|m| m.role == "assistant")
-            {
+            if app.history.last().is_some_and(|m| m.role == "assistant") {
                 app.history.pop();
                 removed += 1;
             }
-            if app
-                .history
-                .last()
-                .is_some_and(|m| m.role == "user")
-            {
+            if app.history.last().is_some_and(|m| m.role == "user") {
                 app.history.pop();
                 removed += 1;
             }
@@ -1994,11 +2055,12 @@ async fn handle_slash_tui(
                     Some(content) => {
                         app.pending_retry = Some(content.clone());
                         let preview: String = content.chars().take(40).collect();
-                        let ellipsis = if content.chars().count() > 40 { "…" } else { "" };
-                        app.push_system(format!(
-                            "[retry] 即将重发: \"{}{}\"",
-                            preview, ellipsis
-                        ));
+                        let ellipsis = if content.chars().count() > 40 {
+                            "…"
+                        } else {
+                            ""
+                        };
+                        app.push_system(format!("[retry] 即将重发: \"{}{}\"", preview, ellipsis));
                     }
                     None => {
                         app.push_system(

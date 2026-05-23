@@ -389,6 +389,7 @@ mod tests {
             messages,
             iteration_count,
             tokens_consumed: tokens,
+            ..Default::default()
         }
     }
 

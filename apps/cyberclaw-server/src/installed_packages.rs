@@ -63,26 +63,26 @@ impl InstalledPackageStore {
                     .join(".cyberclaw")
                     .join("installed-packages.json")
             })
-            .unwrap_or_else(|| {
-                PathBuf::from(".cyberclaw").join("installed-packages.json")
-            })
+            .unwrap_or_else(|| PathBuf::from(".cyberclaw").join("installed-packages.json"))
     }
 
     /// Load from `path`. Missing or malformed files yield an empty store
     /// (logged as a warn but never fatal — bootstrap must always succeed).
     pub fn load(path: PathBuf) -> Self {
         let packages = match std::fs::read_to_string(&path) {
-            Ok(raw) if !raw.trim().is_empty() => match serde_json::from_str::<InstalledPackagesFile>(&raw) {
-                Ok(file) => file.packages,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "installed-packages.json parse failed; starting empty"
-                    );
-                    Vec::new()
+            Ok(raw) if !raw.trim().is_empty() => {
+                match serde_json::from_str::<InstalledPackagesFile>(&raw) {
+                    Ok(file) => file.packages,
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "installed-packages.json parse failed; starting empty"
+                        );
+                        Vec::new()
+                    }
                 }
-            },
+            }
             _ => Vec::new(),
         };
         Self {

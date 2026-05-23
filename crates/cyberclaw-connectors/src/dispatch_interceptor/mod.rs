@@ -70,7 +70,10 @@ pub struct DispatchCtx {
 
 impl DispatchCtx {
     /// Build a fresh context for a dispatch operation.
-    pub fn new(request: CapabilityExecutionRequest, capability_contract: CapabilityContract) -> Self {
+    pub fn new(
+        request: CapabilityExecutionRequest,
+        capability_contract: CapabilityContract,
+    ) -> Self {
         Self {
             request,
             capability_contract,

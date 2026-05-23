@@ -58,7 +58,11 @@ impl DispatchInterceptor for WallClockInterceptor {
         Ok(())
     }
 
-    async fn after(&self, ctx: &DispatchCtx, _result: &mut crate::types::CapabilityExecutionResult) {
+    async fn after(
+        &self,
+        ctx: &DispatchCtx,
+        _result: &mut crate::types::CapabilityExecutionResult,
+    ) {
         // Hot-path log: if we burned > 50% of the deadline, surface a warning
         // so operators can spot near-timeouts in observability streams.
         if let Some(deadline) = ctx.deadline {

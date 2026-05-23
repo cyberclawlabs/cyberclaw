@@ -2,6 +2,7 @@
 
 use crate::client::LlmClient;
 use crate::error::{LlmError, LlmResult};
+use crate::rate_limit_tracker::RateLimitSnapshot;
 use crate::types::{ChatChunk, ChatRequest, ChatResponse};
 use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
@@ -73,6 +74,9 @@ impl LlmClient for OpenAiClient {
             });
         }
 
+        // Capture rate-limit headers before consuming the response body.
+        let rate_limit = RateLimitSnapshot::from_headers(response.headers(), self.provider());
+
         // P1.1 — 读为 bytes 后做两次解析：标准 ChatResponse + OpenAI
         // 特有的 `usage.prompt_tokens_details.cached_tokens` 提取，
         // 填回 ChatResponse.usage.cache_read_input_tokens。
@@ -85,6 +89,7 @@ impl LlmClient for OpenAiClient {
                 }
             }
         }
+        chat_response.rate_limit = rate_limit;
         Ok(chat_response)
     }
 
@@ -158,6 +163,7 @@ impl LlmClient for OpenAiClient {
             tool_choice: None,
             stream: None,
             extra: Default::default(),
+            api_key_override: None,
         };
 
         let url = format!("{}/chat/completions", self.base_url);

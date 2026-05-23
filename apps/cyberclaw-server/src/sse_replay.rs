@@ -124,7 +124,9 @@ impl SseReplayBuffer {
                 map.remove(&oldest_key);
             }
         }
-        let buf = map.entry(conversation_id.to_string()).or_insert_with(ConvBuffer::new);
+        let buf = map
+            .entry(conversation_id.to_string())
+            .or_insert_with(ConvBuffer::new);
         buf.append(data)
     }
 

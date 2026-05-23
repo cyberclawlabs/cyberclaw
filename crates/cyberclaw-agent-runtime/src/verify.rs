@@ -152,12 +152,7 @@ pub trait OutputVerifier: Send + Sync {
     /// `response` — the assistant message about to be finalized.
     ///
     /// `ctx` — verifier-shared context (see [`VerifyCtx`]).
-    async fn verify(
-        &self,
-        prompt: &str,
-        response: &str,
-        ctx: &VerifyCtx,
-    ) -> VerificationDirective;
+    async fn verify(&self, prompt: &str, response: &str, ctx: &VerifyCtx) -> VerificationDirective;
 
     /// Stable identifier — used in log output and chain merging
     /// (later verifiers running with the same name are dropped to
@@ -213,7 +208,11 @@ impl VerifierChain {
     /// before the caller adds their own.
     #[allow(clippy::should_implement_trait)] // builder-style; not std::ops::Add semantics
     pub fn add(mut self, v: Box<dyn OutputVerifier>) -> Self {
-        if self.verifiers.iter().any(|existing| existing.name() == v.name()) {
+        if self
+            .verifiers
+            .iter()
+            .any(|existing| existing.name() == v.name())
+        {
             debug!(name = v.name(), "verifier_chain: dropped duplicate");
         } else {
             self.verifiers.push(v);
@@ -350,12 +349,7 @@ impl CodeBlockVerifier {
                 use cyberclaw_connectors::local::exec_runtime::{run_code, CodeLang};
                 let lang = CodeLang::from_hint(&lang_hint).unwrap_or(CodeLang::Bash);
                 let out = run_code(lang, &source, Some(Duration::from_secs(10))).await;
-                (
-                    out.stdout,
-                    out.stderr,
-                    out.exit_code,
-                    out.runtime_error,
-                )
+                (out.stdout, out.stderr, out.exit_code, out.runtime_error)
             })
         });
         Self::with_executor(executor)
@@ -404,7 +398,9 @@ impl OutputVerifier for CodeBlockVerifier {
 
         for (i, (raw_lang, source)) in blocks.iter().enumerate() {
             let lang = if raw_lang.is_empty() {
-                ctx.language_hint.clone().unwrap_or_else(|| "bash".to_string())
+                ctx.language_hint
+                    .clone()
+                    .unwrap_or_else(|| "bash".to_string())
             } else {
                 raw_lang.clone()
             };
@@ -909,8 +905,8 @@ mod verify_tests {
     async fn json_inline_object_with_required_keys() {
         let v = JsonStructureVerifier::new();
         let resp = r#"{"role": "writer", "artifact": "draft"}"#;
-        let ctx = VerifyCtx::new()
-            .with_expected_json_keys(["role".to_string(), "artifact".to_string()]);
+        let ctx =
+            VerifyCtx::new().with_expected_json_keys(["role".to_string(), "artifact".to_string()]);
         let out = v.verify("p", resp, &ctx).await;
         assert_eq!(out, VerificationDirective::Accept);
     }
@@ -946,8 +942,8 @@ mod verify_tests {
     async fn json_missing_keys_rejects() {
         let v = JsonStructureVerifier::new();
         let resp = r#"{"role": "writer"}"#;
-        let ctx = VerifyCtx::new()
-            .with_expected_json_keys(["role".to_string(), "artifact".to_string()]);
+        let ctx =
+            VerifyCtx::new().with_expected_json_keys(["role".to_string(), "artifact".to_string()]);
         let out = v.verify("p", resp, &ctx).await;
         match out {
             VerificationDirective::RejectAndRetry(msg) => {
@@ -961,8 +957,8 @@ mod verify_tests {
     async fn json_extracted_from_fenced_block() {
         let v = JsonStructureVerifier::new();
         let resp = "Here you go:\n```json\n{\"role\":\"r\",\"artifact\":\"a\"}\n```\nDone.";
-        let ctx = VerifyCtx::new()
-            .with_expected_json_keys(["role".to_string(), "artifact".to_string()]);
+        let ctx =
+            VerifyCtx::new().with_expected_json_keys(["role".to_string(), "artifact".to_string()]);
         let out = v.verify("p", resp, &ctx).await;
         assert_eq!(out, VerificationDirective::Accept);
     }
@@ -971,8 +967,7 @@ mod verify_tests {
     async fn json_response_not_parsable_rejects() {
         let v = JsonStructureVerifier::new();
         let resp = "I don't feel like emitting JSON today.";
-        let ctx = VerifyCtx::new()
-            .with_expected_json_keys(["role".to_string()]);
+        let ctx = VerifyCtx::new().with_expected_json_keys(["role".to_string()]);
         let out = v.verify("p", resp, &ctx).await;
         assert!(matches!(out, VerificationDirective::RejectAndRetry(_)));
     }
@@ -1067,7 +1062,9 @@ mod verify_tests {
             .add(Box::new(CodeBlockVerifier::with_executor(
                 missing_runtime_executor(),
             )))
-            .add(Box::new(RegexAssertVerifier::new().with_patterns(["ok".to_string()])));
+            .add(Box::new(
+                RegexAssertVerifier::new().with_patterns(["ok".to_string()]),
+            ));
         let out = chain
             .run("p", "ok\n```python\nprint(1)\n```", &VerifyCtx::new())
             .await;

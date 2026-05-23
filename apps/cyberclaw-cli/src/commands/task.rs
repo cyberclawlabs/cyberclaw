@@ -184,7 +184,9 @@ async fn handle_list(args: TaskListArgs) -> anyhow::Result<()> {
         // so a percent-encoder is overkill — reject anything outside the
         // ASCII safe set explicitly.
         Some(s) if !s.is_empty() => {
-            if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            if s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 format!("/api/v1/tasks?status={}", s)
             } else {
                 anyhow::bail!(
@@ -279,8 +281,8 @@ async fn handle_get(args: TaskGetArgs) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         OutputFormat::Text => {
-            let view: TaskSummaryView = serde_json::from_value(resp.clone()).unwrap_or_else(|_| {
-                TaskSummaryView {
+            let view: TaskSummaryView =
+                serde_json::from_value(resp.clone()).unwrap_or_else(|_| TaskSummaryView {
                     id: args.task_id.clone(),
                     title: None,
                     summary: None,
@@ -289,8 +291,7 @@ async fn handle_get(args: TaskGetArgs) -> anyhow::Result<()> {
                     status: None,
                     created_at: None,
                     requested_by: None,
-                }
-            });
+                });
             println!("Task Details:");
             println!("  ID:        {}", view.id);
             if let Some(title) = view.title {
@@ -354,7 +355,10 @@ mod tests {
 
     #[test]
     fn parse_kind_canonical() {
-        assert_eq!(parse_kind_for_server("analysis"), serde_json::json!("Analysis"));
+        assert_eq!(
+            parse_kind_for_server("analysis"),
+            serde_json::json!("Analysis")
+        );
         assert_eq!(parse_kind_for_server("review"), serde_json::json!("Review"));
     }
 

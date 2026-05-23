@@ -34,8 +34,8 @@ pub mod curator;
 pub mod dashboard;
 pub mod events;
 pub mod im_platforms;
-pub mod llm_models;
 pub mod kanban;
+pub mod llm_models;
 pub mod login;
 pub mod mcp;
 pub mod moa;
@@ -235,10 +235,7 @@ async fn serve_admin_v2_html() -> Response {
                 // index.html 引用 Vite hashed asset 名（index-XXXX.js），
                 // 必须 no-cache 才能保证新 hash 立即被发现。否则浏览器
                 // 拿着旧 index.html → 永远请求旧 hash → 新 build 看不见。
-                (
-                    header::CACHE_CONTROL,
-                    "no-cache, no-store, must-revalidate",
-                ),
+                (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
                 (header::PRAGMA, "no-cache"),
                 (header::EXPIRES, "0"),
             ],

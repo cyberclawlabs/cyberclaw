@@ -338,7 +338,10 @@ mod tests {
     /// interrogation on '帮我写个 X' prompts (observed v1.2.0 user complaint).
     #[test]
     fn constitution_includes_action_over_interrogation_bias() {
-        for profile in [ConstitutionProfile::SkillFirst, ConstitutionProfile::Generic] {
+        for profile in [
+            ConstitutionProfile::SkillFirst,
+            ConstitutionProfile::Generic,
+        ] {
             let text = cyberclaw_constitution_text(profile);
             assert!(
                 text.contains("IRON LAW 2a"),

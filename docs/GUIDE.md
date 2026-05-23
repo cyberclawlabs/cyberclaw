@@ -91,6 +91,36 @@ Container-isolated capabilities accept a `sandbox` field with one of three profi
 
 Set the profile per-capability in the registry, or rely on the environment default (`dev` for development, `isolated` for production).
 
+### Multi-key credential pool (v1.2.18+)
+
+A single LLM provider can be backed by multiple API keys with automatic rotation on billing exhaustion, rate-limit, or auth failures. Add `[[llm.credentials]]` entries to your config:
+
+```toml
+[[llm.credentials]]
+provider = "anthropic"
+api_key = "sk-ant-key-1"
+max_concurrent = 4
+
+[[llm.credentials]]
+provider = "anthropic"
+api_key = "sk-ant-key-2"
+max_concurrent = 4
+```
+
+Selection strategy is `fill_first` by default; alternatives `round_robin`, `random`, `least_used` are supported. Cooldown duration scales with the failure reason — billing exhaustion locks the key for 24h, rate-limit for 60s, auth-invalid permanently (manual re-enable required).
+
+Single-key deployments using the existing `api_key` field continue to work unchanged.
+
+### Locale (v1.2.18+)
+
+CLI/TUI approval prompts, slash command help, and status messages switch between English and Simplified Chinese based on:
+
+1. `CYBERCLAW_LOCALE` env var (`en` or `zh`)
+2. `LANG` env var (e.g. `zh_CN.UTF-8` resolves to `zh`)
+3. `[localization] default_locale` config setting
+
+Defaults to English. Missing Chinese keys fall back to English automatically.
+
 ## 3. Run locally
 
 ```bash

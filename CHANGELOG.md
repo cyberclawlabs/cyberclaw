@@ -5,6 +5,26 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) fo
 
 ---
 
+## [v1.2.18] — 2026-05-23
+
+Sustaining release focused on LLM cost reduction, reliability, and observability. Zero BREAKING changes — all additive.
+
+### Added
+
+- **Anthropic prompt-cache auto-injection**. System prompt + last 3 messages now automatically tagged with `cache_control: ephemeral`, reducing input token cost on multi-turn Anthropic sessions by approximately 75%. Toggle via `LLM_ANTHROPIC_PROMPT_CACHE_ENABLED` (default on).
+- **Rate-limit headroom display**. `/usage` slash command now shows remaining RPM / TPM with reset timestamps for the active provider, parsed from `x-ratelimit-*` response headers. Lets the operator see how close they are to provider limits before getting a 429.
+- **Semantic LLM error classification**. The retry/failover layer now distinguishes 16 specific failure reasons (`Billing`, `RateLimit`, `ContextOverflow`, `AuthInvalid`, etc.) instead of binary transient/non-transient. Each carries recovery hints that drive different actions: context overflow auto-triggers compression, billing exhaustion triggers credential rotation, rate-limit triggers backoff.
+- **LLM-driven context compression**. Long sessions now produce structured summaries via the configured LLM instead of mechanical truncation. Iterative merge preserves prior summary context across multiple compression cycles, preventing regenerate-from-scratch thrash. Falls back to deterministic truncation if the LLM call fails.
+- **Multi-key credential pool**. New `[[llm.credentials]]` config schema lets a single provider be backed by multiple API keys with automatic rotation on billing / rate-limit / auth-fail errors. Four selection strategies: `FillFirst` (default), `RoundRobin`, `Random`, `LeastUsed`. Cooldown duration scales with the failure reason. Single-key deployments unchanged.
+- **Token cost estimation (USD)**. `/usage` now displays per-session and per-model cost breakdown across input / output / cache_read / cache_write tokens. Built-in pricing table covers Anthropic, OpenAI, DeepSeek, MiniMax, Volcengine Ark, and Gemini families. Unknown models report token counts without cost.
+- **Bilingual UI strings (English + Simplified Chinese)**. Approval prompts, slash command help, error messages, and status lines now switch between English and Chinese based on `CYBERCLAW_LOCALE` env var, `LANG` env var, or `[localization] default_locale` config. Defaults to English; missing Chinese keys fall back to English automatically.
+
+### Changed
+
+- `/usage` command output expanded to include rate-limit headroom, cost USD breakdown, and credential pool status (when configured). Existing token-count display preserved.
+
+---
+
 ## [v1.2.17] — 2026-05-23
 
 Sustaining release on top of `v1.2.16` initial public release. Closes 4 architecture gaps and ships 5 sustaining fixes. Internal business-matrix evaluation against a comparable agent platform: `+25.5pp` accuracy gap closure with `30%` faster median latency.

@@ -277,7 +277,8 @@ pub async fn test_moa(
     let cfg = load_config_from_disk();
     if !cfg.enabled {
         return Err(ApiError::InvalidInput(
-            "MoA is disabled in config — set enabled=true and save before running /test".to_string(),
+            "MoA is disabled in config — set enabled=true and save before running /test"
+                .to_string(),
         ));
     }
     if cfg.proposers.is_empty() {
@@ -576,7 +577,10 @@ mod tests {
         assert_eq!(env_key_for_provider("openai"), Some("oai".to_string()));
         assert_eq!(env_key_for_provider("ark"), Some("ark".to_string()));
         assert_eq!(env_key_for_provider("volcengine"), Some("ark".to_string()));
-        assert_eq!(env_key_for_provider("deepseek"), Some("generic".to_string()));
+        assert_eq!(
+            env_key_for_provider("deepseek"),
+            Some("generic".to_string())
+        );
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("OPENAI_API_KEY");

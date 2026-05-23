@@ -575,7 +575,10 @@ mod tests {
     #[test]
     fn network_policy_to_runtime_network_mode() {
         assert_eq!(NetworkMode::from(NetworkPolicy::None), NetworkMode::None);
-        assert_eq!(NetworkMode::from(NetworkPolicy::Bridge), NetworkMode::Bridge);
+        assert_eq!(
+            NetworkMode::from(NetworkPolicy::Bridge),
+            NetworkMode::Bridge
+        );
         assert_eq!(NetworkMode::from(NetworkPolicy::Host), NetworkMode::Host);
     }
 }

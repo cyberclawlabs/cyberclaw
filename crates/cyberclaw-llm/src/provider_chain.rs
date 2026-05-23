@@ -15,7 +15,9 @@
 //! ```
 
 use crate::client::LlmClient;
+use crate::credential_pool::CredentialPool;
 use crate::error::{LlmError, LlmResult};
+use crate::failover_reason::{classify_llm_error, LlmFailoverReason};
 use crate::types::{ChatChunk, ChatRequest, ChatResponse};
 use async_trait::async_trait;
 use futures::stream::Stream;
@@ -25,10 +27,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
-// LlmErrorKind — classifies errors as transient (retryable) or non-transient
+// LlmErrorKind — backward-compatible 2-way classifier
 // ---------------------------------------------------------------------------
 
-/// Classification of LLM errors for retry decisions.
+/// Coarse classification of LLM errors for retry decisions.
+///
+/// This type is kept for backward compatibility.  New code should use
+/// [`LlmFailoverReason`] and [`classify_llm_error`] for semantic recovery hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmErrorKind {
     /// Transient errors that may succeed on retry (429, 500, 503, timeout).
@@ -37,18 +42,33 @@ pub enum LlmErrorKind {
     NonTransient,
 }
 
-/// Classify an `LlmError` into a retry-relevant kind.
-pub fn classify_error(err: &LlmError) -> LlmErrorKind {
-    match err {
-        LlmError::Timeout => LlmErrorKind::Transient,
-        LlmError::ApiError { status, .. } => match *status {
-            429 | 500 | 502 | 503 | 504 => LlmErrorKind::Transient,
-            400 | 401 | 403 | 404 => LlmErrorKind::NonTransient,
-            _ => LlmErrorKind::NonTransient,
-        },
-        LlmError::HttpError(_) => LlmErrorKind::Transient,
-        _ => LlmErrorKind::NonTransient,
+/// Convert a semantic [`LlmFailoverReason`] to the coarse [`LlmErrorKind`].
+///
+/// Reasons where `should_retry()` is true map to `Transient`; all others map
+/// to `NonTransient`.
+impl From<LlmFailoverReason> for LlmErrorKind {
+    fn from(reason: LlmFailoverReason) -> Self {
+        if reason.should_retry() {
+            LlmErrorKind::Transient
+        } else {
+            LlmErrorKind::NonTransient
+        }
     }
+}
+
+/// Classify an [`LlmError`] into a coarse [`LlmErrorKind`].
+///
+/// Delegates to [`classify_llm_error`] internally and converts via
+/// `From<LlmFailoverReason>`.  Prefer using [`classify_llm_error`] directly
+/// when you need the full semantic reason.
+pub fn classify_error(err: &LlmError) -> LlmErrorKind {
+    let (status, body) = match err {
+        LlmError::Timeout => return LlmErrorKind::Transient,
+        LlmError::HttpError(_) => return LlmErrorKind::Transient,
+        LlmError::ApiError { status, message } => (Some(*status), message.as_str()),
+        _ => (None, ""),
+    };
+    LlmErrorKind::from(classify_llm_error(status, body))
 }
 
 // ---------------------------------------------------------------------------
@@ -77,15 +97,35 @@ impl Default for RetryConfig {
 }
 
 /// Decorator that retries transient failures with exponential backoff.
+///
+/// Optionally integrates with a [`CredentialPool`]: when an error's
+/// [`LlmFailoverReason::should_rotate_credential()`] is true the pool's
+/// next available key is retrieved via `select()` and injected into the
+/// request's `api_key` override field before the next attempt.  If the
+/// pool is exhausted (`rotate()` returns `false`) the error is returned
+/// immediately as terminal.
 pub struct RetryProvider {
     inner: Arc<dyn LlmClient>,
     config: RetryConfig,
+    /// Optional credential pool for multi-key rotation.
+    credential_pool: Option<Arc<CredentialPool>>,
 }
 
 impl RetryProvider {
     /// Create a new retry provider wrapping `inner`.
     pub fn new(inner: Arc<dyn LlmClient>, config: RetryConfig) -> Self {
-        Self { inner, config }
+        Self {
+            inner,
+            config,
+            credential_pool: None,
+        }
+    }
+
+    /// Attach a credential pool.  When set, billing / auth errors trigger
+    /// key rotation instead of immediate failure.
+    pub fn with_credential_pool(mut self, pool: Arc<CredentialPool>) -> Self {
+        self.credential_pool = Some(pool);
+        self
     }
 
     /// Compute delay for the given attempt (0-indexed).
@@ -96,18 +136,74 @@ impl RetryProvider {
             .saturating_mul(2u32.saturating_pow(attempt));
         std::cmp::min(delay, self.config.max_delay)
     }
+
+    /// Try to rotate the credential pool on a rotation-triggering error.
+    ///
+    /// Returns `Some(true)` if rotation succeeded and a new key is available.
+    /// Returns `Some(false)` if the pool is exhausted (caller must surface terminal error).
+    /// Returns `None` if no pool is attached (caller should apply standard retry logic).
+    fn try_rotate_pool(&self, reason: LlmFailoverReason) -> Option<bool> {
+        if let Some(pool) = &self.credential_pool {
+            if reason.should_rotate_credential() {
+                let still_available = pool.rotate(reason);
+                if !still_available {
+                    tracing::warn!(
+                        provider = %pool.provider,
+                        "credential pool exhausted — no fresh keys available"
+                    );
+                }
+                return Some(still_available);
+            }
+        }
+        // No pool attached, or reason doesn't call for credential rotation
+        None
+    }
+
+    /// Inject the current pool key into the request's `api_key_override` field,
+    /// if a pool is present.
+    fn inject_pool_key(&self, mut request: ChatRequest) -> ChatRequest {
+        if let Some(pool) = &self.credential_pool {
+            if let Some(key) = pool.select() {
+                request.api_key_override = Some(key);
+            }
+        }
+        request
+    }
 }
 
 #[async_trait]
 impl LlmClient for RetryProvider {
     async fn chat_completion(&self, request: ChatRequest) -> LlmResult<ChatResponse> {
         let mut last_err: Option<LlmError> = None;
+        // Inject pool key into initial request if pool is present
+        let mut current_request = self.inject_pool_key(request);
 
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
                 if let Some(ref e) = last_err {
-                    if classify_error(e) == LlmErrorKind::NonTransient {
-                        return Err(last_err.unwrap());
+                    let (status, body) = match e {
+                        LlmError::ApiError { status, message } => (Some(*status), message.as_str()),
+                        _ => (None, ""),
+                    };
+                    let reason = classify_llm_error(status, body);
+
+                    match self.try_rotate_pool(reason) {
+                        Some(true) => {
+                            // Pool rotated; inject new key and retry
+                            current_request = self.inject_pool_key(current_request.clone());
+                        }
+                        Some(false) => {
+                            // Pool exhausted — surface as terminal error immediately
+                            return Err(LlmError::Internal(
+                                "credential pool exhausted — all keys on cooldown".to_string(),
+                            ));
+                        }
+                        None => {
+                            // No pool attached — apply standard non-transient check
+                            if classify_error(e) == LlmErrorKind::NonTransient {
+                                return Err(last_err.unwrap());
+                            }
+                        }
                     }
                 }
                 let delay = self.delay_for_attempt(attempt - 1);
@@ -119,7 +215,7 @@ impl LlmClient for RetryProvider {
                 tokio::time::sleep(delay).await;
             }
 
-            match self.inner.chat_completion(request.clone()).await {
+            match self.inner.chat_completion(current_request.clone()).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
                     last_err = Some(e);
@@ -136,12 +232,31 @@ impl LlmClient for RetryProvider {
     ) -> LlmResult<Box<dyn Stream<Item = LlmResult<ChatChunk>> + Send + Unpin>> {
         // Streaming is not retried mid-stream; only the initial connection is retried.
         let mut last_err: Option<LlmError> = None;
+        let mut current_request = self.inject_pool_key(request);
 
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
                 if let Some(ref e) = last_err {
-                    if classify_error(e) == LlmErrorKind::NonTransient {
-                        return Err(last_err.unwrap());
+                    let (status, body) = match e {
+                        LlmError::ApiError { status, message } => (Some(*status), message.as_str()),
+                        _ => (None, ""),
+                    };
+                    let reason = classify_llm_error(status, body);
+
+                    match self.try_rotate_pool(reason) {
+                        Some(true) => {
+                            current_request = self.inject_pool_key(current_request.clone());
+                        }
+                        Some(false) => {
+                            return Err(LlmError::Internal(
+                                "credential pool exhausted — all keys on cooldown".to_string(),
+                            ));
+                        }
+                        None => {
+                            if classify_error(e) == LlmErrorKind::NonTransient {
+                                return Err(last_err.unwrap());
+                            }
+                        }
                     }
                 }
                 let delay = self.delay_for_attempt(attempt - 1);
@@ -153,7 +268,11 @@ impl LlmClient for RetryProvider {
                 tokio::time::sleep(delay).await;
             }
 
-            match self.inner.chat_completion_stream(request.clone()).await {
+            match self
+                .inner
+                .chat_completion_stream(current_request.clone())
+                .await
+            {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     last_err = Some(e);
@@ -609,6 +728,7 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
             }],
             usage: None,
+            rate_limit: None,
         }
     }
 
@@ -965,5 +1085,157 @@ mod tests {
         assert_eq!(retry.delay_for_attempt(3), Duration::from_secs(8));
         assert_eq!(retry.delay_for_attempt(4), Duration::from_secs(16));
         assert_eq!(retry.delay_for_attempt(5), Duration::from_secs(30)); // capped
+    }
+
+    // -----------------------------------------------------------------------
+    // RetryProvider + CredentialPool integration tests
+    // -----------------------------------------------------------------------
+
+    use crate::credential_pool::{CredentialPool, SelectionStrategy};
+
+    /// Mock that fails with a billing error on the first N calls, then succeeds.
+    /// Also records the api_key_override it received so tests can assert rotation.
+    struct PoolMockProvider {
+        name: String,
+        billing_fail_count: AtomicU32,
+        call_count: AtomicU32,
+        received_keys: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl PoolMockProvider {
+        fn new_billing(name: &str, fail_n: u32) -> Self {
+            Self {
+                name: name.to_string(),
+                billing_fail_count: AtomicU32::new(fail_n),
+                call_count: AtomicU32::new(0),
+                received_keys: std::sync::Mutex::new(vec![]),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            self.call_count.load(Ordering::SeqCst)
+        }
+
+        fn received_keys(&self) -> Vec<Option<String>> {
+            self.received_keys.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for PoolMockProvider {
+        async fn chat_completion(&self, request: ChatRequest) -> LlmResult<ChatResponse> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.received_keys
+                .lock()
+                .unwrap()
+                .push(request.api_key_override.clone());
+            let remaining = self.billing_fail_count.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.billing_fail_count.fetch_sub(1, Ordering::SeqCst);
+                return Err(LlmError::ApiError {
+                    status: 429,
+                    // Body triggers Billing classification via pattern match
+                    message: "insufficient credits for this request".to_string(),
+                });
+            }
+            Ok(dummy_response())
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> LlmResult<Box<dyn Stream<Item = LlmResult<ChatChunk>> + Send + Unpin>> {
+            Ok(Box::new(futures::stream::empty()))
+        }
+
+        fn provider(&self) -> &str {
+            &self.name
+        }
+
+        async fn validate_connection(&self) -> LlmResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_provider_rotates_on_billing_error() {
+        // Pool with 2 keys; first call will fail with billing error, triggering rotation.
+        let pool = Arc::new(CredentialPool::new(
+            "anthropic",
+            vec!["key-a".to_string(), "key-b".to_string()],
+            SelectionStrategy::FillFirst,
+        ));
+        let mock = Arc::new(PoolMockProvider::new_billing("pool-mock", 1));
+
+        let retry = RetryProvider::new(
+            mock.clone(),
+            RetryConfig {
+                max_retries: 3,
+                base_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(10),
+            },
+        )
+        .with_credential_pool(pool.clone());
+
+        let result = retry.chat_completion(dummy_request()).await;
+        assert!(result.is_ok(), "should succeed after rotating to key-b");
+        assert_eq!(mock.calls(), 2, "expected 1 billing failure + 1 success");
+
+        // After rotation, key-a should be on cooldown
+        assert_eq!(pool.available_count(), 1);
+        let keys = mock.received_keys();
+        // First call gets key-a (or initial select), second gets whatever pool.select() gives
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_retry_provider_falls_back_on_pool_exhaustion() {
+        // Pool with only 1 key; billing error exhausts the pool.
+        let pool = Arc::new(CredentialPool::new(
+            "anthropic",
+            vec!["key-only".to_string()],
+            SelectionStrategy::FillFirst,
+        ));
+        let mock = Arc::new(PoolMockProvider::new_billing("exhaust-mock", 10));
+
+        let retry = RetryProvider::new(
+            mock.clone(),
+            RetryConfig {
+                max_retries: 3,
+                base_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(10),
+            },
+        )
+        .with_credential_pool(pool.clone());
+
+        let result = retry.chat_completion(dummy_request()).await;
+        assert!(result.is_err(), "should fail when pool exhausted");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("pool exhausted") || err_msg.contains("credential"),
+            "error should mention pool exhaustion, got: {err_msg}"
+        );
+        // Only 1 call: initial attempt fails, rotation exhausts pool, no more attempts
+        assert_eq!(mock.calls(), 1);
+        assert_eq!(pool.available_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_retry_provider_single_key_mode_unchanged() {
+        // No credential pool attached — retry behavior is unchanged.
+        let mock = Arc::new(MockProvider::with_failures("no-pool", 2, 500));
+        let retry = RetryProvider::new(
+            mock.clone(),
+            RetryConfig {
+                max_retries: 3,
+                base_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(10),
+            },
+        );
+        // No .with_credential_pool() call
+
+        let result = retry.chat_completion(dummy_request()).await;
+        assert!(result.is_ok(), "transient failures should still be retried");
+        assert_eq!(mock.calls(), 3); // 1 initial + 2 retries
     }
 }

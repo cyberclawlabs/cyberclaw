@@ -75,7 +75,11 @@ impl DispatchInterceptor for TruncationMetadataInterceptor {
         Ok(())
     }
 
-    async fn after(&self, _ctx: &DispatchCtx, result: &mut crate::types::CapabilityExecutionResult) {
+    async fn after(
+        &self,
+        _ctx: &DispatchCtx,
+        result: &mut crate::types::CapabilityExecutionResult,
+    ) {
         let (field_signal, marker_signal) = Self::detect_truncation(&result.output);
         if !field_signal && !marker_signal {
             return;

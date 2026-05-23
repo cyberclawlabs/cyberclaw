@@ -8,10 +8,10 @@ pub mod config;
 pub mod constitution;
 pub mod context_compressor;
 pub mod deferred_registry;
-pub mod loop_governor;
 pub mod dsml_parser;
 pub mod error;
 pub mod loop_delegate;
+pub mod loop_governor;
 pub mod memory_integration;
 pub mod mock;
 pub mod prompt_assembler;
@@ -42,7 +42,9 @@ pub use skill_binder::{SkillBinder, SkillBinding, SkillInfo, SkillProvider, Skil
 pub use sub_agent::{AgentHandle, AgentStatus, SpawnPolicy, SubAgentError, SubAgentOrchestrator};
 
 pub use context_compressor::{
-    CompressedResult, CompressionConfig, CompressionStage, ContextCompressor, MemoryLevel,
+    CompressedResult, CompressionConfig, CompressionStage, ContextCompressionError,
+    ContextCompressor, ContextSummarizer, DeterministicSummarizer, LlmContextSummarizer,
+    MemoryLevel, COMPRESSION_SYSTEM_PROMPT,
 };
 
 pub use loop_governor::{

@@ -988,12 +988,16 @@ async fn main() -> Result<()> {
         // Production deployments setting USE_TLS=true without cert paths used
         // to crash with a Rust panic stack; now they get a clear pointer to
         // the missing env var.
-        let cert_path = env::var("TLS_CERT_PATH").map_err(|_| anyhow::anyhow!(
+        let cert_path = env::var("TLS_CERT_PATH").map_err(|_| {
+            anyhow::anyhow!(
             "USE_TLS=true requires TLS_CERT_PATH to point at your PEM-format TLS certificate file."
-        ))?;
-        let key_path = env::var("TLS_KEY_PATH").map_err(|_| anyhow::anyhow!(
+        )
+        })?;
+        let key_path = env::var("TLS_KEY_PATH").map_err(|_| {
+            anyhow::anyhow!(
             "USE_TLS=true requires TLS_KEY_PATH to point at your PEM-format TLS private key file."
-        ))?;
+        )
+        })?;
 
         use axum_server::tls_rustls::RustlsConfig;
         let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
@@ -1308,13 +1312,18 @@ fn maybe_register_browser_connector(
         tokio::task::spawn_blocking(move || {
             let addr = format!("{host}:{port}");
             let reachable = std::net::TcpStream::connect_timeout(
-                &addr.parse().ok().or_else(|| {
-                    // host might be a name not an IP; try DNS resolve via to_socket_addrs
-                    use std::net::ToSocketAddrs;
-                    addr.to_socket_addrs().ok().and_then(|mut a| a.next())
-                }).unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
+                &addr
+                    .parse()
+                    .ok()
+                    .or_else(|| {
+                        // host might be a name not an IP; try DNS resolve via to_socket_addrs
+                        use std::net::ToSocketAddrs;
+                        addr.to_socket_addrs().ok().and_then(|mut a| a.next())
+                    })
+                    .unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
                 std::time::Duration::from_millis(500),
-            ).is_ok();
+            )
+            .is_ok();
             if reachable {
                 info!("✓ Browser CDP probe: {} is reachable", debug_url);
             } else {
@@ -1333,7 +1342,9 @@ fn maybe_register_browser_connector(
 
 /// Parse `http://host:port[/...]` into (host, port). Returns None if parse fails.
 fn parse_debug_url(url: &str) -> Option<(String, u16)> {
-    let trimmed = url.trim_start_matches("http://").trim_start_matches("https://");
+    let trimmed = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     let authority = trimmed.split('/').next()?;
     let (host, port_str) = authority.rsplit_once(':')?;
     let port = port_str.parse::<u16>().ok()?;

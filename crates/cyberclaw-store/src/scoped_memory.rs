@@ -238,8 +238,7 @@ impl ScopedMemory {
         if self.raw_turns.len() >= self.full_retention_turns {
             // Evict the oldest raw turn into the compressed tail.
             if let Some(evicted) = self.raw_turns.pop_front() {
-                let compressed =
-                    CompressedTurn::from_turn(&evicted, self.compressed_content_chars);
+                let compressed = CompressedTurn::from_turn(&evicted, self.compressed_content_chars);
                 self.compressed_window.push(compressed);
             }
         }
@@ -379,7 +378,9 @@ mod tests {
         assert_eq!(rendered.len(), k + 1);
         // First block is the synthetic summary system message.
         assert_eq!(rendered[0].role, TurnRole::System);
-        assert!(rendered[0].content.starts_with("[Earlier context, 5 turns]"));
+        assert!(rendered[0]
+            .content
+            .starts_with("[Earlier context, 5 turns]"));
         // The 5 earliest "turn-0..turn-4" should be in the synthetic body.
         for i in 0..5 {
             assert!(

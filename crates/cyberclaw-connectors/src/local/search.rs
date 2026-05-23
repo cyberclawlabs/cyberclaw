@@ -1102,7 +1102,11 @@ mod tests {
             output.count, output.counts
         );
         // counts vec must have 3 entries (one per file)
-        assert_eq!(output.counts.len(), 3, "expected per-file counts for 3 files");
+        assert_eq!(
+            output.counts.len(),
+            3,
+            "expected per-file counts for 3 files"
+        );
         // Per-file values: auth.py=2, billing.py=1, checkout.py=2
         let by_file: std::collections::HashMap<&str, u32> = output
             .counts

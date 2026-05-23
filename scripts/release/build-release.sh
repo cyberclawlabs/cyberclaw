@@ -36,16 +36,51 @@ fail()  { echo -e "  ${RED}✗${RST} $*"; exit 1; }
 # ─────────────────────────────────────────────────────────────────────
 say "1. preparing target: $RELEASE_DIR"
 # ─────────────────────────────────────────────────────────────────────
-if [[ -d "$RELEASE_DIR" ]]; then
+# SAFETY (2026-05-23): if RELEASE_DIR contains a .git directory, refuse
+# to rm -rf — that would destroy local git history and uncommitted
+# changes. Override with FORCE_WIPE=1 only when intentional.
+#
+# Discovered when build-release.sh was re-run against an already-cloned
+# cyberclawlabs/cyberclaw working tree → silently wiped .git → lost the
+# local remote tracking + history (recoverable via re-clone but
+# disruptive and error-prone). Default behavior now: preserve .git,
+# rsync --delete --exclude=.git over the working tree.
+USE_RSYNC_DELETE=0
+if [[ -d "$RELEASE_DIR/.git" ]]; then
+  if [[ "${FORCE_WIPE:-0}" == "1" ]]; then
+    warn "FORCE_WIPE=1: wiping $RELEASE_DIR despite .git presence"
+    rm -rf "$RELEASE_DIR"
+    mkdir -p "$RELEASE_DIR"
+    ok "wiped (forced)"
+  else
+    ok "preserving existing git repo at $RELEASE_DIR/.git"
+    ok "(rsync --delete --exclude=.git will replace working tree)"
+    ok "(set FORCE_WIPE=1 to override and rm -rf)"
+    USE_RSYNC_DELETE=1
+  fi
+elif [[ -d "$RELEASE_DIR" ]]; then
+  # No .git inside — safe to wipe fully
   rm -rf "$RELEASE_DIR"
-  ok "removed existing $RELEASE_DIR"
+  mkdir -p "$RELEASE_DIR"
+  ok "removed existing $RELEASE_DIR (no .git inside)"
+else
+  mkdir -p "$RELEASE_DIR"
+  ok "created fresh $RELEASE_DIR"
 fi
-mkdir -p "$RELEASE_DIR"
 
 # ─────────────────────────────────────────────────────────────────────
 say "2. rsync source → release with exclude rules"
 # ─────────────────────────────────────────────────────────────────────
-rsync -a \
+RSYNC_DELETE_FLAG=""
+if [[ "$USE_RSYNC_DELETE" == "1" ]]; then
+  # When preserving .git, use --delete so removed-from-source files
+  # disappear from release too (otherwise old artifacts accumulate).
+  # --exclude='/.git/' is already below; combining --delete with it
+  # protects .git from being deleted as "not in source".
+  RSYNC_DELETE_FLAG="--delete"
+  ok "using rsync --delete to remove stale files (excluding .git)"
+fi
+rsync -a $RSYNC_DELETE_FLAG \
   --exclude='target/' \
   --exclude='node_modules/' \
   --exclude='tmp/' \
@@ -74,8 +109,61 @@ rsync -a \
   --exclude='/docs/implementation/' \
   --exclude='/docs/development/' \
   --exclude='/docs/superpowers/' \
+  --exclude='/docs/architecture/' \
+  --exclude='/docs/api/' \
+  --exclude='/docs/builders/' \
+  --exclude='/docs/business/' \
+  --exclude='/docs/configuration/' \
+  --exclude='/docs/deployment/' \
+  --exclude='/docs/getting-started/' \
+  --exclude='/docs/guides/' \
+  --exclude='/docs/modules/' \
+  --exclude='/docs/reference/' \
+  --exclude='/docs/research/' \
+  --exclude='/docs/security/' \
+  --exclude='/docs/templates/' \
+  --exclude='/docs/testing/' \
+  --exclude='/docs/user-guide/' \
+  --exclude='/docs/web3/' \
+  --exclude='/docs/INDEX.md' \
+  --exclude='/docs/SECURITY-ADVISORY-*.md' \
   --exclude='/scripts/testing/' \
   --exclude='BUSINESS_DELIVERY_REPORT.md' \
+  --exclude='**/PRODUCTION_READINESS_REVIEW.md' \
+  --exclude='**/TEST_REPORT.md' \
+  --exclude='**/HEARTBEAT_REPORT.md' \
+  --exclude='**/*_COMPLETION_REPORT.md' \
+  --exclude='**/*_REVIEW_DECISION*.md' \
+  --exclude='/docs/research/hermes-*.md' \
+  --exclude='/docs/research/v2-ui-audit.md' \
+  --exclude='/agi-t3-doc.md' \
+  --exclude='/.cyberclaw/' \
+  --exclude='**/.env.production' \
+  --exclude='/scripts/release/RELEASE_PROTOCOL.md' \
+  --exclude='/tools/business-matrix/transcripts/' \
+  --exclude='/uploads/' \
+  --exclude='/artifacts/' \
+  --exclude='/.matrix-fixtures/' \
+  --exclude='/region_revenue.json' \
+  --exclude='/web/dist/' \
+  --exclude='/memory_*.yml' \
+  --exclude='/hermes_*.yml' \
+  --exclude='/cyberclaw_chat.yml' \
+  --exclude='/cyberclaw_govern.yml' \
+  --exclude='/cyberclaw_skills.yml' \
+  --exclude='/docs/PRODUCTION_READINESS_CHECKLIST.md' \
+  --exclude='/DOCUMENTATION_SYSTEM.md' \
+  --exclude='/PROJECT_STRUCTURE.md' \
+  --exclude='/RELEASE_MANIFEST.md' \
+  --exclude='/package.json' \
+  --exclude='/playwright.config.ts' \
+  --exclude='/tools/' \
+  --exclude='/README.md' \
+  --exclude='/README.zh-CN.md' \
+  --exclude='/CHANGELOG.md' \
+  --exclude='/DEVELOPMENT.md' \
+  --exclude='/ACKNOWLEDGMENTS.md' \
+  --exclude='/docs/README.md' \
   --exclude='**/tests/' \
   --exclude='**/fuzz/' \
   --exclude='/*.png' \
@@ -197,7 +285,7 @@ TOTAL_SIZE=$(du -sh "$RELEASE_DIR" | awk '{print $1}')
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 VERSION=$(awk -F'"' '/^version *= *"/ {print $2; exit}' "$SOURCE_DIR/Cargo.toml" 2>/dev/null || echo "0.1.0")
 
-cat > "$RELEASE_DIR/RELEASE_MANIFEST.md" <<EOF
+cat > "/tmp/cyberclaw-release-manifest-${VERSION}.md" <<EOF
 # CyberClaw — release manifest
 
 **Tag:** v${VERSION}
@@ -272,7 +360,7 @@ gh release create v${VERSION} \\
   --title "v${VERSION}" --notes-file CHANGELOG.md
 \`\`\`
 EOF
-ok "RELEASE_MANIFEST.md generated"
+ok "RELEASE_MANIFEST.md generated → /tmp/cyberclaw-release-manifest-${VERSION}.md (internal, do not ship)"
 
 # ─────────────────────────────────────────────────────────────────────
 say "8. pre-publish sanity checks"

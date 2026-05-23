@@ -662,6 +662,7 @@ mod tests {
                     total_tokens: 15,
                     ..Default::default()
                 }),
+                rate_limit: None,
             }
         }
     }

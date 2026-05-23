@@ -1172,6 +1172,7 @@ mod tests {
                     finish_reason: Some("stop".into()),
                 }],
                 usage: None,
+                rate_limit: None,
             })
         }
         async fn chat_completion_stream(

@@ -240,6 +240,7 @@ mod tests {
             messages: Vec::new(),
             iteration_count: 1,
             tokens_consumed: 100,
+            ..Default::default()
         }
     }
 

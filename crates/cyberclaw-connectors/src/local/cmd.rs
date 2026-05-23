@@ -514,7 +514,8 @@ pub async fn exec(
         // the sandbox profile, not inline here. `cmd.exec` is whitelisted
         // and historically had NetworkMode::None → use `isolated`.
         let profile = SandboxProfile::isolated();
-        let cap_shim = cmd_capability_shim("cmd.exec", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let cap_shim =
+            cmd_capability_shim("cmd.exec", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         let effective = profile
             .validate_and_resolve(&cap_shim)
             .map_err(|e| anyhow::anyhow!("sandbox profile resolve failed: {}", e))?;
@@ -686,7 +687,8 @@ pub async fn run(
         // all come from the profile — no inline ContainerConfig assembly
         // that could collide with the runtime's implicit `--tmpfs /tmp`.
         let profile = SandboxProfile::dev();
-        let cap_shim = cmd_capability_shim("cmd.run", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let cap_shim =
+            cmd_capability_shim("cmd.run", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         let effective = profile
             .validate_and_resolve(&cap_shim)
             .map_err(|e| anyhow::anyhow!("sandbox profile resolve failed: {}", e))?;
@@ -706,8 +708,7 @@ pub async fn run(
 
         info!(
             "cmd.run: dispatching inside container image={} profile={} (cmd=bash -c)",
-            container_cfg.image,
-            effective.profile_id,
+            container_cfg.image, effective.profile_id,
         );
 
         let result = rt
@@ -1126,7 +1127,10 @@ pub async fn run_powershell(
     let effective_ps_time = match ps_profile.validate_and_resolve(&ps_cap_shim) {
         Ok(eff) => eff.time_budget,
         Err(e) => {
-            warn!("cmd.run_powershell: sandbox profile resolve failed ({}), using raw timeout", e);
+            warn!(
+                "cmd.run_powershell: sandbox profile resolve failed ({}), using raw timeout",
+                e
+            );
             Duration::from_millis(timeout_ms)
         }
     };

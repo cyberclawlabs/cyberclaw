@@ -46,7 +46,11 @@ Read these first:
 3. [AGENTS.md](AGENTS.md)
 4. [CLAUDE.md](CLAUDE.md)
 
-If your change touches architecture, also read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+If your change touches architecture, also read:
+
+1. [docs/architecture/README.md](docs/architecture/README.md)
+2. [docs/architecture/overview/ARCHITECTURE_V2.0.md](docs/architecture/overview/ARCHITECTURE_V2.0.md)
+3. [docs/architecture/overview/CORE_TYPES_V2.0.md](docs/architecture/overview/CORE_TYPES_V2.0.md)
 
 ## Contribution Rules
 

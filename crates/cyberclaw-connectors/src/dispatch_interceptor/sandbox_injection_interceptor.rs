@@ -69,6 +69,10 @@ impl DispatchInterceptor for SandboxInjectionInterceptor {
         Ok(())
     }
 
-    async fn after(&self, _ctx: &DispatchCtx, _result: &mut crate::types::CapabilityExecutionResult) {
+    async fn after(
+        &self,
+        _ctx: &DispatchCtx,
+        _result: &mut crate::types::CapabilityExecutionResult,
+    ) {
     }
 }

@@ -50,9 +50,8 @@ impl LineConfig {
     /// 任一缺失返回 `Err`，让 `register_adapter` 决定是否在 register 失败时
     /// 走 graceful skip。
     pub fn from_env() -> anyhow::Result<Self> {
-        let token = std::env::var("LINE_CHANNEL_ACCESS_TOKEN").map_err(|_| {
-            anyhow::anyhow!("LINE_CHANNEL_ACCESS_TOKEN env not set")
-        })?;
+        let token = std::env::var("LINE_CHANNEL_ACCESS_TOKEN")
+            .map_err(|_| anyhow::anyhow!("LINE_CHANNEL_ACCESS_TOKEN env not set"))?;
         let secret = std::env::var("LINE_CHANNEL_SECRET")
             .map_err(|_| anyhow::anyhow!("LINE_CHANNEL_SECRET env not set"))?;
         Ok(Self {
@@ -197,17 +196,12 @@ impl ImPlatformAdapter for LineAdapter {
             .to_string();
         let sender = source.user_id.clone().unwrap_or_else(|| chat_id.clone());
         let ts_ms = event.timestamp.unwrap_or(0);
-        let timestamp = chrono::DateTime::from_timestamp_millis(ts_ms)
-            .unwrap_or_else(chrono::Utc::now);
+        let timestamp =
+            chrono::DateTime::from_timestamp_millis(ts_ms).unwrap_or_else(chrono::Utc::now);
 
         let (message_type, text_content, voice_media_id, voice_duration_secs) =
             match msg.msg_type.as_str() {
-                "text" => (
-                    ImMessageType::Text,
-                    msg.text.clone(),
-                    None,
-                    None,
-                ),
+                "text" => (ImMessageType::Text, msg.text.clone(), None, None),
                 "audio" => (
                     ImMessageType::Voice,
                     None,

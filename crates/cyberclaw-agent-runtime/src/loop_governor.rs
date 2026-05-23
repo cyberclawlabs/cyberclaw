@@ -469,6 +469,7 @@ mod tests {
             messages: vec![],
             iteration_count: 0,
             tokens_consumed: 0,
+            ..Default::default()
         }
     }
 
@@ -477,6 +478,7 @@ mod tests {
             messages: msgs,
             iteration_count: 0,
             tokens_consumed: 0,
+            ..Default::default()
         }
     }
 
@@ -620,8 +622,14 @@ mod tests {
             &c,
             &IterationResult::TextResponse("alpha bravo charlie".into()),
         );
-        gov.record_iteration_result(&c, &IterationResult::TextResponse("delta echo foxtrot".into()));
-        gov.record_iteration_result(&c, &IterationResult::TextResponse("golf hotel india".into()));
+        gov.record_iteration_result(
+            &c,
+            &IterationResult::TextResponse("delta echo foxtrot".into()),
+        );
+        gov.record_iteration_result(
+            &c,
+            &IterationResult::TextResponse("golf hotel india".into()),
+        );
 
         assert_eq!(gov.pre_iteration(&c), LoopDecision::Continue);
     }

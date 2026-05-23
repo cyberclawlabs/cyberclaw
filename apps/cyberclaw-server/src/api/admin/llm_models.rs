@@ -175,8 +175,5 @@ pub fn create_admin_llm_models_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/admin/llm/models", get(list_models).post(add_model))
         .route("/api/v1/admin/llm/models/default", put(set_default))
-        .route(
-            "/api/v1/admin/llm/models/:id",
-            delete_method(delete_model),
-        )
+        .route("/api/v1/admin/llm/models/:id", delete_method(delete_model))
 }

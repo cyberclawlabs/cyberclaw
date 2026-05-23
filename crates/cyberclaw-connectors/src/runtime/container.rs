@@ -504,9 +504,7 @@ impl ContainerRuntime {
             if !container_config.skip_implicit_tmp_tmpfs {
                 cmd.arg("--tmpfs").arg("/tmp:rw,noexec,nosuid,size=100m");
             } else {
-                debug!(
-                    "Skipping implicit --tmpfs /tmp: SandboxProfile owns /tmp via volumes"
-                );
+                debug!("Skipping implicit --tmpfs /tmp: SandboxProfile owns /tmp via volumes");
             }
         }
 
@@ -637,9 +635,7 @@ impl ContainerRuntime {
     /// resulting `EffectiveSandbox` here to obtain a `ContainerConfig`
     /// that is **guaranteed conflict-free** with the runtime's own
     /// implicit mounts (notably the legacy `--tmpfs /tmp` branch).
-    pub fn config_from_sandbox(
-        sandbox: &crate::sandbox::EffectiveSandbox,
-    ) -> ContainerConfig {
+    pub fn config_from_sandbox(sandbox: &crate::sandbox::EffectiveSandbox) -> ContainerConfig {
         let mut volumes: HashMap<PathBuf, PathBuf> = HashMap::new();
         for (container_path, spec) in &sandbox.mounts {
             // Bind mounts only — tmpfs mounts would need a different

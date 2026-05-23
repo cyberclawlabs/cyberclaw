@@ -23,10 +23,48 @@ provider = "minimax"
 model = "minimax-m2.5"
 
 # API Key（建议通过环境变量 LLM_API_KEY 设置，而不是写在配置文件中）
+# 如果没有配置 [[llm.credentials]]，则使用此单 key（向后兼容）
 # api_key = "***"
 
 # API Base URL
 base_url = "https://api.minimax.chat/v1"
+
+# 多 key 凭据池（可选）
+# 配置后将自动启用 key 轮换，按策略在多个 API key 间分配请求。
+# 支持的 strategy 值: fill_first（默认）, round_robin, random, least_used
+#
+# 轮换触发条件（基于 Gap 1.2 的 LlmFailoverReason）：
+#   - Billing      → 24 小时冷却
+#   - RateLimit    → 60 秒冷却
+#   - QuotaExceeded → 5 分钟冷却
+#   - AuthInvalid / AuthExpired → 永久（需人工恢复）
+#
+# 示例：为 anthropic 配置 2 个 key
+# [[llm.credentials]]
+# provider = "anthropic"
+# api_key = "sk-ant-key-1"
+# max_concurrent = 4
+#
+# [[llm.credentials]]
+# provider = "anthropic"
+# api_key = "sk-ant-key-2"
+# max_concurrent = 4
+#
+# 示例：为 openai 配置 3 个 key（round_robin 策略）
+# [llm.credential_pool]
+# strategy = "round_robin"
+#
+# [[llm.credentials]]
+# provider = "openai"
+# api_key = "sk-oai-key-1"
+#
+# [[llm.credentials]]
+# provider = "openai"
+# api_key = "sk-oai-key-2"
+#
+# [[llm.credentials]]
+# provider = "openai"
+# api_key = "sk-oai-key-3"
 
 # 请求参数默认值
 [llm.defaults]
@@ -88,3 +126,10 @@ default_model = "claude-3-5-sonnet-20241022"
 [logging]
 level = "info"
 format = "json"
+
+# 本地化配置
+[localization]
+# 默认语言：en（英文）或 zh（简体中文）
+# 服务端初始化时调用 cyberclaw_core::i18n::set_locale()
+# 客户端 locale 通过 CYBERCLAW_LOCALE / LANG 环境变量控制
+default_locale = "en"

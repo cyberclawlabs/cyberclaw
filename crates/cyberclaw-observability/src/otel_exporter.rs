@@ -831,8 +831,8 @@ pub fn init_from_env() -> Result<Option<Arc<OtelExporter>>, ExportError> {
     if endpoint.trim().is_empty() {
         return Ok(None);
     }
-    let service_name = std::env::var("CYBERCLAW_OTLP_SERVICE_NAME")
-        .unwrap_or_else(|_| "cyberclaw".to_string());
+    let service_name =
+        std::env::var("CYBERCLAW_OTLP_SERVICE_NAME").unwrap_or_else(|_| "cyberclaw".to_string());
     let batch_interval_secs = std::env::var("CYBERCLAW_OTLP_BATCH_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())

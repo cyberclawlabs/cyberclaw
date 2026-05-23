@@ -261,7 +261,10 @@ async fn truncation_metadata_adds_meta_field_when_marker_present() {
         Some(true)
     );
     // Sibling fields preserved at top level (no `original` wrapping for objects).
-    assert_eq!(result.output.get("exit_code").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(
+        result.output.get("exit_code").and_then(|v| v.as_i64()),
+        Some(0)
+    );
     assert!(result.output.get("stdout").is_some());
 }
 

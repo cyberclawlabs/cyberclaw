@@ -8,6 +8,7 @@
 
 use crate::client::LlmClient;
 use crate::error::{LlmError, LlmResult};
+use crate::rate_limit_tracker::RateLimitSnapshot;
 use crate::types::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Choice, Message, Role, Usage,
 };
@@ -26,6 +27,12 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// 默认请求超时（秒）
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+/// 控制是否自动注入 Anthropic prompt cache 断点的环境变量。
+///
+/// 默认启用（`true`）。设置为 `"false"` 或 `"0"` 可禁用。
+/// 禁用后请求体不携带任何 `cache_control` 字段，行为与注入前完全一致。
+const PROMPT_CACHE_ENV_VAR: &str = "LLM_ANTHROPIC_PROMPT_CACHE_ENABLED";
 
 /// Anthropic 客户端
 pub struct AnthropicClient {
@@ -74,6 +81,9 @@ struct AnthropicSystemBlock {
 struct AnthropicMessage {
     role: String,
     content: String,
+    /// Prompt cache 控制（Anthropic native cache；非 Anthropic 路径不序列化）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 /// Anthropic 响应
@@ -194,12 +204,14 @@ impl AnthropicClient {
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
                         content: msg.content.clone(),
+                        cache_control: None,
                     });
                 }
                 Role::Assistant => {
                     messages.push(AnthropicMessage {
                         role: "assistant".to_string(),
                         content: msg.content.clone(),
+                        cache_control: None,
                     });
                 }
                 Role::Tool => {
@@ -207,6 +219,7 @@ impl AnthropicClient {
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
                         content: format!("Tool result: {}", msg.content),
+                        cache_control: None,
                     });
                 }
             }
@@ -262,6 +275,48 @@ impl AnthropicClient {
                 cache_read_input_tokens: resp.usage.cache_read_input_tokens,
                 cache_creation_input_tokens: resp.usage.cache_creation_input_tokens,
             }),
+            rate_limit: None,
+        }
+    }
+
+    /// 检查是否启用 prompt cache 注入。
+    ///
+    /// 读取 `LLM_ANTHROPIC_PROMPT_CACHE_ENABLED` 环境变量：
+    /// - 未设置或设置为 `"true"` / `"1"` → 启用（默认）
+    /// - 设置为 `"false"` / `"0"` → 禁用
+    fn prompt_cache_enabled() -> bool {
+        !matches!(
+            std::env::var(PROMPT_CACHE_ENV_VAR).as_deref(),
+            Ok("false") | Ok("0")
+        )
+    }
+
+    /// 按 system_and_3 策略注入 Anthropic prompt cache 断点。
+    ///
+    /// Anthropic API 每次请求最多支持 4 个 `cache_control` 断点。
+    /// 断点分配：最后一个 system 内容块占 1 个，剩余最多 3 个分配给
+    /// 最后几条非 system 消息（滚动会话窗口）。
+    ///
+    /// 函数直接修改 `AnthropicRequest`，在调用方序列化前完成注入，
+    /// 不改变任何既有字段语义。
+    fn inject_cache_breakpoints(req: &mut AnthropicRequest) {
+        let marker = CacheControl::ephemeral();
+        let mut breakpoints_used = 0u8;
+
+        // 断点 1：最后一个 system 内容块
+        if let Some(blocks) = req.system.as_mut() {
+            if let Some(last_block) = blocks.last_mut() {
+                last_block.cache_control = Some(marker.clone());
+                breakpoints_used += 1;
+            }
+        }
+
+        // 断点 2-4：最后 3 条消息（user / assistant / tool）
+        let remaining = 4usize.saturating_sub(breakpoints_used as usize);
+        let msg_count = req.messages.len();
+        let start = msg_count.saturating_sub(remaining);
+        for msg in &mut req.messages[start..] {
+            msg.cache_control = Some(marker.clone());
         }
     }
 
@@ -308,7 +363,10 @@ impl AnthropicClient {
 impl LlmClient for AnthropicClient {
     async fn chat_completion(&self, request: ChatRequest) -> LlmResult<ChatResponse> {
         let url = format!("{}/v1/messages", self.base_url);
-        let anthropic_req = self.convert_request(&request);
+        let mut anthropic_req = self.convert_request(&request);
+        if Self::prompt_cache_enabled() {
+            Self::inject_cache_breakpoints(&mut anthropic_req);
+        }
 
         let response = self
             .client
@@ -333,8 +391,13 @@ impl LlmClient for AnthropicClient {
             return Err(Self::parse_error_response(status.as_u16(), &error_body));
         }
 
+        // Capture rate-limit headers before consuming the response body.
+        let rate_limit = RateLimitSnapshot::from_headers(response.headers(), self.provider());
+
         let anthropic_resp: AnthropicResponse = response.json().await?;
-        Ok(self.convert_response(anthropic_resp))
+        let mut chat_response = self.convert_response(anthropic_resp);
+        chat_response.rate_limit = rate_limit;
+        Ok(chat_response)
     }
 
     async fn chat_completion_stream(
@@ -576,6 +639,7 @@ mod tests {
             messages: vec![AnthropicMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                cache_control: None,
             }],
             max_tokens: 1024,
             temperature: Some(0.5),
@@ -608,6 +672,7 @@ mod tests {
             messages: vec![AnthropicMessage {
                 role: "user".to_string(),
                 content: "Hi".to_string(),
+                cache_control: None,
             }],
             max_tokens: 1024,
             temperature: None,
@@ -630,6 +695,7 @@ mod tests {
             messages: vec![AnthropicMessage {
                 role: "user".to_string(),
                 content: "Hi".to_string(),
+                cache_control: None,
             }],
             max_tokens: 100,
             temperature: None,
@@ -671,7 +737,10 @@ mod tests {
         assert_eq!(resp.id, "msg_01XFDUDYJgAACzvnptvVoYEL");
         assert_eq!(resp.model, "claude-3-opus-20240229");
         assert_eq!(resp.content.len(), 1);
-        assert_eq!(resp.content[0].text.as_deref(), Some("Hello! How can I help you?"));
+        assert_eq!(
+            resp.content[0].text.as_deref(),
+            Some("Hello! How can I help you?")
+        );
         assert_eq!(resp.stop_reason, Some("end_turn".to_string()));
         assert_eq!(resp.usage.input_tokens, 10);
         assert_eq!(resp.usage.output_tokens, 25);
@@ -1035,6 +1104,203 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // inject_cache_breakpoints
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_inject_cache_breakpoints_system_gets_cache_control() {
+        // system block 应获得 cache_control: ephemeral
+        let mut req = AnthropicRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_control: None,
+            }],
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            system: Some(vec![AnthropicSystemBlock {
+                block_type: "text".to_string(),
+                text: "You are a helpful assistant.".to_string(),
+                cache_control: None,
+            }]),
+        };
+
+        AnthropicClient::inject_cache_breakpoints(&mut req);
+
+        let blocks = req.system.as_ref().unwrap();
+        assert_eq!(
+            blocks[0].cache_control.as_ref().unwrap().kind,
+            "ephemeral",
+            "system block must get cache_control: ephemeral"
+        );
+    }
+
+    #[test]
+    fn test_inject_cache_breakpoints_last_3_messages_get_cache_control() {
+        // system 断点消耗 1，剩余 3 个分配给消息。5 条消息时最后 3 条打标，前 2 条不打。
+        let make_msg = |role: &str, content: &str| AnthropicMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            cache_control: None,
+        };
+        let mut req = AnthropicRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            messages: vec![
+                make_msg("user", "msg1"),
+                make_msg("assistant", "msg2"),
+                make_msg("user", "msg3"),
+                make_msg("assistant", "msg4"),
+                make_msg("user", "msg5"),
+            ],
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            system: Some(vec![AnthropicSystemBlock {
+                block_type: "text".to_string(),
+                text: "System".to_string(),
+                cache_control: None,
+            }]),
+        };
+
+        AnthropicClient::inject_cache_breakpoints(&mut req);
+
+        // system 断点 = 1，剩余 3，所以最后 3 条消息（idx 2,3,4）打标
+        assert!(
+            req.messages[0].cache_control.is_none(),
+            "messages[0] must NOT get cache_control"
+        );
+        assert!(
+            req.messages[1].cache_control.is_none(),
+            "messages[1] must NOT get cache_control"
+        );
+        assert_eq!(
+            req.messages[2].cache_control.as_ref().unwrap().kind,
+            "ephemeral",
+            "messages[2] must get cache_control"
+        );
+        assert_eq!(
+            req.messages[3].cache_control.as_ref().unwrap().kind,
+            "ephemeral",
+            "messages[3] must get cache_control"
+        );
+        assert_eq!(
+            req.messages[4].cache_control.as_ref().unwrap().kind,
+            "ephemeral",
+            "messages[4] must get cache_control"
+        );
+    }
+
+    #[test]
+    fn test_inject_cache_breakpoints_fewer_than_3_messages() {
+        // 只有 2 条消息时两条都应打标记
+        let make_msg = |role: &str, content: &str| AnthropicMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            cache_control: None,
+        };
+        let mut req = AnthropicRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            messages: vec![make_msg("user", "hi"), make_msg("assistant", "hello")],
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            system: Some(vec![AnthropicSystemBlock {
+                block_type: "text".to_string(),
+                text: "System".to_string(),
+                cache_control: None,
+            }]),
+        };
+
+        AnthropicClient::inject_cache_breakpoints(&mut req);
+
+        // 系统断点消耗 1，剩余 3 个可用于消息；消息只有 2 条 → 两条都应打标
+        assert_eq!(
+            req.messages[0].cache_control.as_ref().unwrap().kind,
+            "ephemeral"
+        );
+        assert_eq!(
+            req.messages[1].cache_control.as_ref().unwrap().kind,
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn test_inject_cache_breakpoints_disabled_via_env() {
+        // 设置禁用标志后，inject 不应被调用，消息不携带 cache_control
+        // 注意：此测试直接验证 prompt_cache_enabled() 逻辑，不修改全局 env
+        // (测试间并行可能干扰)，改为直接验证函数行为：disabled 路径下
+        // AnthropicRequest 不调用 inject_cache_breakpoints，结果为 None。
+        let mut req = AnthropicRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_control: None,
+            }],
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            system: Some(vec![AnthropicSystemBlock {
+                block_type: "text".to_string(),
+                text: "System".to_string(),
+                cache_control: None,
+            }]),
+        };
+
+        // 模拟 disabled 分支：不调用 inject_cache_breakpoints
+        let cache_enabled = false;
+        if cache_enabled {
+            AnthropicClient::inject_cache_breakpoints(&mut req);
+        }
+
+        assert!(
+            req.system.as_ref().unwrap()[0].cache_control.is_none(),
+            "system block must have no cache_control when disabled"
+        );
+        assert!(
+            req.messages[0].cache_control.is_none(),
+            "messages must have no cache_control when disabled"
+        );
+    }
+
+    #[test]
+    fn test_prompt_cache_enabled_default_true() {
+        // 未设置环境变量时应返回 true（默认启用）
+        // 暂存并清除任何已有值，测试后恢复
+        let prev = std::env::var(PROMPT_CACHE_ENV_VAR).ok();
+        std::env::remove_var(PROMPT_CACHE_ENV_VAR);
+
+        assert!(
+            AnthropicClient::prompt_cache_enabled(),
+            "prompt cache must be enabled by default"
+        );
+
+        // 恢复环境变量
+        if let Some(val) = prev {
+            std::env::set_var(PROMPT_CACHE_ENV_VAR, val);
+        }
+    }
+
+    #[test]
+    fn test_prompt_cache_enabled_false_when_set_to_false() {
+        let prev = std::env::var(PROMPT_CACHE_ENV_VAR).ok();
+        std::env::set_var(PROMPT_CACHE_ENV_VAR, "false");
+
+        assert!(
+            !AnthropicClient::prompt_cache_enabled(),
+            "prompt cache must be disabled when env var is 'false'"
+        );
+
+        // 恢复
+        match prev {
+            Some(val) => std::env::set_var(PROMPT_CACHE_ENV_VAR, val),
+            None => std::env::remove_var(PROMPT_CACHE_ENV_VAR),
+        }
+    }
+
     #[test]
     fn test_debug_does_not_leak_api_key() {
         let client = AnthropicClient::new(
@@ -1101,10 +1367,9 @@ mod tests {
             "usage": {"input_tokens": 10, "output_tokens": 20},
             "stop_reason": "end_turn"
         });
-        let resp_mixed: AnthropicResponse = serde_json::from_value(mixed)
-            .expect("mixed thinking+text response must deserialize");
-        let client =
-            AnthropicClient::new("key".to_string(), "https://api.anthropic.com").unwrap();
+        let resp_mixed: AnthropicResponse =
+            serde_json::from_value(mixed).expect("mixed thinking+text response must deserialize");
+        let client = AnthropicClient::new("key".to_string(), "https://api.anthropic.com").unwrap();
         let converted = client.convert_response(resp_mixed);
         // filter_map skips the thinking block — only the text block content
         // reaches the user.

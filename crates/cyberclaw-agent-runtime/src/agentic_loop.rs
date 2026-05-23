@@ -19,6 +19,7 @@ use cyberclaw_core::execution::ExecutionContext;
 use cyberclaw_core::gateway::OrchestratorGateway;
 use cyberclaw_core::ids::SkillId;
 use cyberclaw_llm::client::LlmClient;
+use cyberclaw_llm::rate_limit_tracker::RateLimitSnapshot;
 use cyberclaw_llm::types::{ChatRequest, Message, Role, ToolCall, ToolDefinition};
 
 use crate::loop_governor::{AgenticLoopGovernor, LoopCtx, LoopDecision, LoopProfile};
@@ -144,6 +145,9 @@ pub struct LoopSummary {
     pub tokens_used: u64,
     /// Final output text (if any).
     pub final_output: Option<String>,
+    /// Rate-limit snapshot from the last LLM call in this loop.
+    /// `None` when the provider did not return `x-ratelimit-*` headers.
+    pub last_rate_limit: Option<RateLimitSnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +155,7 @@ pub struct LoopSummary {
 // ---------------------------------------------------------------------------
 
 /// Internal mutable state of the agentic loop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LoopState {
     /// Conversation messages accumulated so far.
     pub messages: Vec<Message>,
@@ -159,6 +163,8 @@ pub struct LoopState {
     pub iteration_count: u32,
     /// Total tokens consumed across all LLM calls.
     pub tokens_consumed: u64,
+    /// Rate-limit snapshot from the most recent LLM call.
+    pub last_rate_limit: Option<RateLimitSnapshot>,
 }
 
 impl LoopState {
@@ -167,6 +173,7 @@ impl LoopState {
             messages: Vec::new(),
             iteration_count: 0,
             tokens_consumed: 0,
+            last_rate_limit: None,
         }
     }
 }
@@ -435,11 +442,7 @@ impl DefaultAgenticLoop {
     /// Multiple skills can be appended; each is prefixed with a
     /// `## Auto-bound skill: {name}` heading for parity with the
     /// chat-handler injection format.
-    pub fn append_skill_to_system_prompt(
-        &mut self,
-        skill_name: &str,
-        body: &str,
-    ) -> &mut Self {
+    pub fn append_skill_to_system_prompt(&mut self, skill_name: &str, body: &str) -> &mut Self {
         let section = format!("\n\n## Auto-bound skill: {skill_name}\n\n{body}");
         // Always update the config so a later re-init still has the bound text.
         self.config.system_prompt.push_str(&section);
@@ -680,8 +683,7 @@ impl AgenticLoop for DefaultAgenticLoop {
                         msgs_before = self.state.messages.len(),
                         "agentic_loop: governor CompressAndContinue"
                     );
-                    let compressed =
-                        governor.compressor_mut().compress_all(&self.state.messages);
+                    let compressed = governor.compressor_mut().compress_all(&self.state.messages);
                     tracing::info!(
                         msgs_after = compressed.messages.len(),
                         tokens_saved = compressed.tokens_saved_estimate,
@@ -703,6 +705,11 @@ impl AgenticLoop for DefaultAgenticLoop {
             .chat_completion(request)
             .await
             .map_err(|e| anyhow::anyhow!("LLM call failed: {e}"))?;
+
+        // Capture rate-limit headers from this LLM response.
+        if response.rate_limit.is_some() {
+            self.state.last_rate_limit = response.rate_limit.clone();
+        }
 
         // Track token usage.
         if let Some(usage) = &response.usage {
@@ -744,14 +751,9 @@ impl AgenticLoop for DefaultAgenticLoop {
         // DSML synthesis: some vendors (DeepSeek v4) emit tool intent as
         // in-content markup instead of populating tool_calls. Detect and
         // convert so the dispatch path below handles it uniformly.
-        let dsml_empty = message
-            .tool_calls
-            .as_ref()
-            .is_none_or(|tc| tc.is_empty());
+        let dsml_empty = message.tool_calls.as_ref().is_none_or(|tc| tc.is_empty());
         if dsml_empty {
-            if let Some(parsed) =
-                crate::dsml_parser::parse_dsml_tool_calls(&message.content)
-            {
+            if let Some(parsed) = crate::dsml_parser::parse_dsml_tool_calls(&message.content) {
                 message.content = crate::dsml_parser::strip_dsml(&message.content);
                 message.tool_calls = Some(parsed);
             }
@@ -876,9 +878,9 @@ impl AgenticLoop for DefaultAgenticLoop {
                         // Pass through.
                     }
                     VerificationDirective::ContinueWithFeedback(fb) => {
-                        self.state.messages.push(Message::user(format!(
-                            "[verifier feedback]\n{fb}"
-                        )));
+                        self.state
+                            .messages
+                            .push(Message::user(format!("[verifier feedback]\n{fb}")));
                         result = IterationResult::Continue;
                     }
                     VerificationDirective::RejectAndRetry(fb) => {
@@ -889,9 +891,9 @@ impl AgenticLoop for DefaultAgenticLoop {
                             );
                             // Keep result as Done(text) — accept after one retry.
                         } else {
-                            self.state.messages.push(Message::user(format!(
-                                "[verifier rejected — retry]\n{fb}"
-                            )));
+                            self.state
+                                .messages
+                                .push(Message::user(format!("[verifier rejected — retry]\n{fb}")));
                             self.verifier_retry_used = true;
                             result = IterationResult::Continue;
                         }
@@ -938,6 +940,7 @@ impl AgenticLoop for DefaultAgenticLoop {
             iterations: self.state.iteration_count,
             tokens_used: self.state.tokens_consumed,
             final_output,
+            last_rate_limit: self.state.last_rate_limit.clone(),
         })
     }
 
@@ -992,6 +995,7 @@ mod tests {
                     total_tokens: 15,
                     ..Default::default()
                 }),
+                rate_limit: None,
             }
         }
 
@@ -1012,6 +1016,7 @@ mod tests {
                     total_tokens: 15,
                     ..Default::default()
                 }),
+                rate_limit: None,
             }
         }
     }
@@ -1135,7 +1140,10 @@ mod tests {
             // Iter 1: 11k thinking tokens consumed, content is just "\n  ".
             MockLlm::make_text_response("\n  ", "stop"),
             // Iter 2: model produces the actual answer.
-            MockLlm::make_text_response("fn parse_kv() -> Vec<(String, String)> { vec![] }", "stop"),
+            MockLlm::make_text_response(
+                "fn parse_kv() -> Vec<(String, String)> { vec![] }",
+                "stop",
+            ),
         ]));
         let gw = Arc::new(MockGateway);
         let mut loop_ = DefaultAgenticLoop::new(llm, gw);
@@ -1188,10 +1196,7 @@ mod tests {
         let gw = Arc::new(MockGateway);
         let mut loop_ = DefaultAgenticLoop::new(llm, gw);
 
-        loop_
-            .init(LoopConfig::default())
-            .await
-            .unwrap();
+        loop_.init(LoopConfig::default()).await.unwrap();
         loop_.add_user_message("test");
 
         let r1 = loop_.next_iteration().await.unwrap();
@@ -1555,7 +1560,9 @@ mod tests {
     /// call in a batch failed.
     #[tokio::test]
     async fn test_add_system_hint_appends_system_message() {
-        let llm = Arc::new(MockLlm::new(vec![MockLlm::make_text_response("ok", "stop")]));
+        let llm = Arc::new(MockLlm::new(vec![MockLlm::make_text_response(
+            "ok", "stop",
+        )]));
         let gw = Arc::new(MockGateway);
         let mut loop_ = DefaultAgenticLoop::new(llm, gw);
 
@@ -1571,10 +1578,18 @@ mod tests {
         let before = loop_.state.messages.len();
         loop_.add_system_hint("ENFORCEMENT: try again");
         let after = loop_.state.messages.len();
-        assert_eq!(after, before + 1, "add_system_hint must append exactly one message");
+        assert_eq!(
+            after,
+            before + 1,
+            "add_system_hint must append exactly one message"
+        );
 
         let last = loop_.state.messages.last().expect("at least one message");
-        assert_eq!(last.role, Role::System, "appended message must have System role");
+        assert_eq!(
+            last.role,
+            Role::System,
+            "appended message must have System role"
+        );
         assert_eq!(last.content, "ENFORCEMENT: try again");
     }
 
@@ -1712,8 +1727,7 @@ mod tests {
         .unwrap();
 
         let llm = Arc::new(MockLlm::new(vec![MockLlm::make_text_response(
-            "ok",
-            "stop",
+            "ok", "stop",
         )]));
         let gw = Arc::new(MockGateway);
         let mut loop_ = DefaultAgenticLoop::new(llm, gw);
@@ -1741,7 +1755,9 @@ mod tests {
             .find(|m| m.role == Role::System)
             .expect("system message exists");
         assert!(sys_msg.content.contains("base sys"));
-        assert!(sys_msg.content.contains("Auto-bound skill: domain-expert-web3"));
+        assert!(sys_msg
+            .content
+            .contains("Auto-bound skill: domain-expert-web3"));
         assert!(sys_msg.content.contains("multisig"));
         assert!(sys_msg.content.contains("Tenderly"));
     }
@@ -1819,12 +1835,9 @@ mod tests {
         let gw = Arc::new(MockGateway);
 
         // 3) Build the verifier chain: response MUST contain "multisig".
-        let chain = Arc::new(
-            VerifierChain::new()
-                .add(Box::new(
-                    RegexAssertVerifier::new().with_patterns(["multisig".to_string()]),
-                )),
-        );
+        let chain = Arc::new(VerifierChain::new().add(Box::new(
+            RegexAssertVerifier::new().with_patterns(["multisig".to_string()]),
+        )));
 
         // 4) Build governor with generous budgets so it does NOT trip — we
         //    only want to confirm it observes the iterations.
@@ -1874,7 +1887,9 @@ mod tests {
             .find(|m| m.role == Role::System)
             .expect("system message");
         assert!(sys_msg.content.contains("Web3 expert"));
-        assert!(sys_msg.content.contains("Auto-bound skill: domain-expert-web3"));
+        assert!(sys_msg
+            .content
+            .contains("Auto-bound skill: domain-expert-web3"));
 
         // Governor observed real token spend (>0 across 2 iterations).
         let gov = loop_.governor.as_ref().expect("governor installed");

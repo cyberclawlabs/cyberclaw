@@ -55,9 +55,7 @@ use std::time::Duration;
 use tracing::{debug, error, info};
 
 pub use process_sandbox::{run_sandboxed, SandboxRequest, SandboxResponse, MAX_OUTPUT_BYTES};
-pub use profile::{
-    EffectiveSandbox, MountSpec, NetworkPolicy, SandboxProfile, SandboxProfileId,
-};
+pub use profile::{EffectiveSandbox, MountSpec, NetworkPolicy, SandboxProfile, SandboxProfileId};
 
 /// Default env keys that may pass through to the child process.
 ///

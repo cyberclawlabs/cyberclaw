@@ -45,10 +45,7 @@ use crate::state::AppState;
 pub fn create_packages_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v2/packages", get(list_packages).post(install_package))
-        .route(
-            "/api/v2/packages/:kind/:id",
-            delete(uninstall_package),
-        )
+        .route("/api/v2/packages/:kind/:id", delete(uninstall_package))
         .route("/api/v2/status", get(get_status))
 }
 
@@ -99,11 +96,7 @@ async fn list_packages(
         .map_err(|e| ApiError::InternalError(format!("registry list failed: {e}")))?;
 
     let mut packages: Vec<PackageView> = records.iter().map(to_view).collect();
-    packages.sort_by(|a, b| {
-        a.kind
-            .cmp(&b.kind)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    packages.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.id.cmp(&b.id)));
     let total = packages.len();
     Ok(Json(PackagesResponse { packages, total }))
 }
@@ -262,9 +255,7 @@ pub struct StatusResponse {
     pub default_model: String,
 }
 
-async fn get_status(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<StatusResponse>, ApiError> {
+async fn get_status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, ApiError> {
     // Agents + Plugins come from the manifest-driven package_registry —
     // that's where ecosystem auto-scan + user-installed packages land.
     let agents = state

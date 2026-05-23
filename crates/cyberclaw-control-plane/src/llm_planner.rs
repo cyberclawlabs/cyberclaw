@@ -529,6 +529,7 @@ mod tests {
                     finish_reason: Some("stop".to_string()),
                 }],
                 usage: self.usage_to_return.clone(),
+                rate_limit: None,
             })
         }
         async fn chat_completion_stream(

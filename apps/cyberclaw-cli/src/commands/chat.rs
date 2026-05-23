@@ -15,6 +15,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use cyberclaw_core::i18n::t;
 use futures::StreamExt;
 use reqwest::Client;
 use rustyline::error::ReadlineError;
@@ -63,6 +64,28 @@ pub struct ChatArgs {
 // SSE frame types
 // ---------------------------------------------------------------------------
 
+/// Rate-limit snapshot from a server SSE `rate_limit` frame.
+#[derive(Debug, Clone)]
+pub struct SseRateLimit {
+    pub provider: String,
+    pub requests_limit: Option<u64>,
+    pub requests_remaining: Option<u64>,
+    pub tokens_limit: Option<u64>,
+    pub tokens_remaining: Option<u64>,
+    pub requests_reset_secs: Option<f64>,
+    pub tokens_reset_secs: Option<f64>,
+}
+
+/// Token usage snapshot from a server SSE `usage` frame.
+#[derive(Debug, Clone)]
+pub struct SseUsage {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
 /// SSE 帧解析结果
 #[derive(Debug)]
 pub enum SseFrame {
@@ -72,6 +95,10 @@ pub enum SseFrame {
     Clarify(ClarifyPayload),
     /// 澄清已解答（静默继续）
     ClarifyResolved,
+    /// Rate-limit snapshot from the server.
+    RateLimit(SseRateLimit),
+    /// Token usage snapshot from the server (for cost estimation).
+    Usage(SseUsage),
     /// 流结束
     Done,
     /// 未知帧（跳过）
@@ -314,6 +341,48 @@ pub fn parse_sse_data(data: &str) -> SseFrame {
             SseFrame::Unknown
         }
         Some("clarify_resolved") => SseFrame::ClarifyResolved,
+        Some("rate_limit") => {
+            if let Some(rl) = v.get("rate_limit") {
+                let provider = rl
+                    .get("provider")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                return SseFrame::RateLimit(SseRateLimit {
+                    provider,
+                    requests_limit: rl.get("requests_limit").and_then(|v| v.as_u64()),
+                    requests_remaining: rl.get("requests_remaining").and_then(|v| v.as_u64()),
+                    tokens_limit: rl.get("tokens_limit").and_then(|v| v.as_u64()),
+                    tokens_remaining: rl.get("tokens_remaining").and_then(|v| v.as_u64()),
+                    requests_reset_secs: rl.get("requests_reset_secs").and_then(|v| v.as_f64()),
+                    tokens_reset_secs: rl.get("tokens_reset_secs").and_then(|v| v.as_f64()),
+                });
+            }
+            SseFrame::Unknown
+        }
+        Some("usage") => {
+            if let Some(u) = v.get("usage") {
+                let model = u
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                return SseFrame::Usage(SseUsage {
+                    model,
+                    input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                    output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                    cache_read_tokens: u
+                        .get("cache_read_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    cache_write_tokens: u
+                        .get("cache_write_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                });
+            }
+            SseFrame::Unknown
+        }
         _ => {
             // token 帧：{"choices":[{"delta":{"content":"..."}}]}
             if let Some(content) = v
@@ -482,6 +551,12 @@ async fn send_message(
                 true
             }
             SseFrame::ClarifyResolved => true,
+            // Rate limit info is silently ignored in the legacy REPL path;
+            // it is consumed by the TUI via TokenEvent::RateLimit instead.
+            SseFrame::RateLimit(_) => true,
+            // Usage info is silently ignored in the legacy REPL path;
+            // cost tracking is only active in the TUI (TokenEvent::Usage).
+            SseFrame::Usage(_) => true,
             SseFrame::Done => false,
             SseFrame::Unknown => true,
         }
@@ -594,7 +669,7 @@ pub async fn handle_slash(
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     match parts[0] {
         "/help" | "/h" => {
-            println!("Slash 命令:");
+            println!("{}", t("slash.help"));
             println!("  /help           — 显示帮助");
             println!("  /compress       — 压缩会话历史");
             println!("  /save <path>    — 导出会话为 markdown");
@@ -641,7 +716,7 @@ pub async fn handle_slash(
             return Ok(SlashResult::Quit);
         }
         _ => {
-            println!("[!] 未知命令: {}。输入 /help 查看命令列表", parts[0]);
+            println!("[!] {}", t("error.unknown_command").replace("{}", parts[0]));
         }
     }
     Ok(SlashResult::Continue)
@@ -762,6 +837,22 @@ pub async fn send_message_tui(
                 true
             }
             SseFrame::ClarifyResolved => true,
+            SseFrame::RateLimit(rl) => {
+                let _ = tok.try_send(chat_tui::TokenEvent::RateLimit(chat_tui::RateLimitInfo {
+                    provider: rl.provider,
+                    requests_limit: rl.requests_limit,
+                    requests_remaining: rl.requests_remaining,
+                    tokens_limit: rl.tokens_limit,
+                    tokens_remaining: rl.tokens_remaining,
+                    requests_reset_secs: rl.requests_reset_secs,
+                    tokens_reset_secs: rl.tokens_reset_secs,
+                }));
+                true
+            }
+            SseFrame::Usage(u) => {
+                let _ = tok.try_send(chat_tui::TokenEvent::Usage(u));
+                true
+            }
             SseFrame::Done => false,
             SseFrame::Unknown => true,
         }
@@ -914,9 +1005,11 @@ async fn resolve_default_model(client: &Client, server: &str) -> String {
     }
 
     // 2. Fall back to local catalog cache.
-    let path = std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".cyberclaw").join("models.json"));
+    let path = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".cyberclaw")
+            .join("models.json")
+    });
     if let Some(p) = path {
         if let Ok(body) = std::fs::read_to_string(&p) {
             #[derive(serde::Deserialize)]

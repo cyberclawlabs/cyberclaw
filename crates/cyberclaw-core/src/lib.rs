@@ -65,6 +65,8 @@ pub mod facade;
 pub mod gateway;
 /// Handoff 模块 - Agent→Agent 运行时会话控制权转移（Sprint 21）
 pub mod handoff;
+/// 国际化支持模块 — 编译时字符串表，支持 en / zh 两种语言（v1）
+pub mod i18n;
 /// 身份管理模块 - 用户和服务身份
 pub mod identity;
 /// ID 生成模块 - 各类唯一标识符

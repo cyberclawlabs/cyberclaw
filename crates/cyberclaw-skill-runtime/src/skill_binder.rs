@@ -452,9 +452,8 @@ spec:
         let mut b = SkillBinder::new();
         b.push(rule("web3", vec![vec!["multisig"], vec!["usdc"]], 80));
         b.push(rule("devops", vec![vec!["deploy"]], 70));
-        let hits = b.match_prompt(
-            "we are deploying a multisig contract upgrade, USDC treasury at risk",
-        );
+        let hits =
+            b.match_prompt("we are deploying a multisig contract upgrade, USDC treasury at risk");
         let names: Vec<&str> = hits.iter().map(|r| r.skill_name.as_str()).collect();
         assert_eq!(names, vec!["web3", "devops"]);
     }

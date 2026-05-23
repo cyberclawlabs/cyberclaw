@@ -301,8 +301,7 @@ async fn check_connectors(_config_dir: &std::path::Path) -> CheckResult {
     let server =
         std::env::var("CYBERCLAW_SERVER").unwrap_or_else(|_| "http://127.0.0.1:38090".into());
     let status_url = format!("{}/api/v2/status", server.trim_end_matches('/'));
-    let token_path =
-        cyberclaw_control_plane::wizard_engine::default_config_dir().join("cli-token");
+    let token_path = cyberclaw_control_plane::wizard_engine::default_config_dir().join("cli-token");
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -524,8 +523,7 @@ async fn check_ecosystem() -> CheckResult {
     // Inline token load: doctor doesn't carry a CliState here, so re-read
     // ~/.cyberclaw/cli-token directly. Anonymous probe still works if the
     // server permits unauthed status reads; if not, we'll see 401.
-    let token_path =
-        cyberclaw_control_plane::wizard_engine::default_config_dir().join("cli-token");
+    let token_path = cyberclaw_control_plane::wizard_engine::default_config_dir().join("cli-token");
     let mut req = client.get(&status_url);
     if let Ok(tok) = std::fs::read_to_string(&token_path) {
         let t = tok.trim();

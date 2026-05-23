@@ -172,11 +172,7 @@ impl LlmClient for GenericOpenAiClient {
                                             }
                                         }
                                         Err(e) => {
-                                            if tx
-                                                .send(Err(LlmError::JsonError(e)))
-                                                .await
-                                                .is_err()
-                                            {
+                                            if tx.send(Err(LlmError::JsonError(e))).await.is_err() {
                                                 return;
                                             }
                                         }
@@ -212,6 +208,7 @@ impl LlmClient for GenericOpenAiClient {
             tool_choice: None,
             stream: None,
             extra: Default::default(),
+            api_key_override: None,
         };
 
         let url = format!("{}/chat/completions", self.base_url);

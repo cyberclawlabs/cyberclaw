@@ -484,6 +484,7 @@ mod tests {
                     finish_reason: Some("stop".into()),
                 }],
                 usage: None,
+                rate_limit: None,
             })
         }
 
