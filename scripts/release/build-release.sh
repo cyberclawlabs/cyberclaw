@@ -164,6 +164,11 @@ rsync -a $RSYNC_DELETE_FLAG \
   --exclude='/DEVELOPMENT.md' \
   --exclude='/ACKNOWLEDGMENTS.md' \
   --exclude='/docs/README.md' \
+  --exclude='/docs/ARCHITECTURE.md' \
+  --exclude='/docs/GUIDE.md' \
+  --exclude='/docs/ENVIRONMENT_VARIABLES.md' \
+  --exclude='/assets/' \
+  --exclude='/apps/cyberclaw-server/.env.production.example' \
   --exclude='**/tests/' \
   --exclude='**/fuzz/' \
   --exclude='/*.png' \

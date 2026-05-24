@@ -5,6 +5,44 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) fo
 
 ---
 
+## [v1.2.19] — 2026-05-23
+
+TUI bug-fix sprint. Patch release closing 16 user-facing bugs surfaced by 9 rounds of real-LLM end-to-end testing. Zero new features; pure stability + UX. Recommended upgrade for all users.
+
+### Fixed
+
+- **Anthropic streaming hang** — outer wall-clock hard cap (180-240s depending on profile) prevents indefinite spinner on stalled agentic loops.
+- **Governance silent denial** — when a request is denied by policy (e.g., `Read /etc/shadow`), the TUI now shows a diagnostic message instead of an empty response.
+- **Tool approval visibility** — when a capability dispatch enters the approval queue, the TUI displays `⏳ Awaiting approval for <tool> — check /approvals` instead of a silent spinner. Approval is required for high-risk capabilities under Auto Mode.
+- **MiniMax provider pricing** — `/usage` slash command now correctly displays USD cost for `MiniMax-M2.x` and `MiniMax-M2.x-HighSpeed` model variants.
+- **Web search provider override** — `WEB_SEARCH_PROVIDER=exa` environment variable now correctly routes to Exa instead of falling through to DuckDuckGo. Endpoint override only forces DDG when the endpoint URL itself is DDG-shaped.
+- **CJK text streaming** — SSE response parser now correctly handles multi-byte UTF-8 characters split across HTTP chunk boundaries (common with non-English LLM output). Prior behavior crashed the stream.
+- **JWT expiry guidance** — when the CLI token expires, the TUI now shows `提示：JWT 已过期，请运行 rm ~/.cyberclaw/cli-token 后重新执行 cyberclaw onboard 获取新令牌` instead of a raw 401 error.
+- **Queued message handling on auth failure** — when a 401/auth error fires, any queued user messages are explicitly cleared with a `[queue] N 条排队消息已丢弃（认证失败）` notice rather than being silently sent again on the next stream.
+- **Scroll back through conversation history** — `PgUp/PgDn` scroll the conversation viewport; `Home/End` jump to top/live tail. Auto-pin to bottom unless user is reading history. The input box footer now shows `PgUp/PgDn 滚屏`.
+- **TUI banner** — top of TUI displays `⚡ CYBERCLAW v1.2.19 │ <model> │ <conversation-id>` for brand visibility and quick session identification.
+- **`--new` conversation flag** — `cyberclaw chat --new` now correctly creates a fresh conversation even when `--conversation` or `--resume` is also present (previously `--new` was silently ignored).
+- **Multi-line shell scripts** — `cmd.run` capability now accepts arguments containing `\n` / `\r` (e.g., heredoc-piped Python scripts via `bash -c "python3 - << 'EOF' ... EOF"`). Previously rejected as control characters.
+- **Assistant timestamp accuracy** — `assistant` message timestamps in the conversation pane now reflect actual reply-complete time, not user-submit time (previously identical).
+- **Local timezone display** — TUI timestamps now display in the user's local timezone instead of UTC. Storage/audit timestamps remain UTC.
+- **Multi-turn + tool call reliability** — Resolves MiniMax API error 2013 ("tool result's tool id not found") that previously broke any session after the first tool call. The provider adapter now normalizes system-role message ordering to satisfy MiniMax's strict requirement that system messages appear only once, at position 0.
+- **Workspace boundary guidance** — agents now receive their workspace root path in the system prompt and know to write files inside the workspace rather than `/tmp/`. Configurable via `CYBERCLAW_AGENT_WORKSPACE_ROOT` env var.
+
+### Changed
+
+- **Loop profile selection** — multi-turn conversations and turn-1 prompts that mention file paths, tools, or agentic keywords now automatically use the high-budget L3 profile (128k tokens, 240s wall-clock). Previously these often hit L1's smaller 32k budget and reported "budget exhausted".
+- **Dynamic budget upgrade** — the agentic loop governor now auto-promotes the budget tier (L1 → L2 → L3) when consumption reaches 75% of the current ceiling and the loop has executed more than one iteration. Up to two promotions per session. A new `BudgetUpgraded` SSE event surfaces this transition.
+- **L1 token budget** raised from 8,000 to 32,000 (matches L2). L1 wall-clock raised from 60s to 180s. These minimum allocations accommodate the actual size of the system prompt + tools schema.
+- **`/usage` slash command output** — now displays token totals + rate-limit headroom (RPM/TPM) + cost USD breakdown + credential pool status (when configured). Existing token-count display preserved.
+
+### Notes
+
+- Zero BREAKING changes — all fixes are additive or behavior-preserving
+- All fixes verified across 9 rounds of side-by-side TUI testing vs hermes-agent
+- Recommended for any user experiencing budget exhausted errors, silent denial, multi-turn breakage, or TUI rendering issues on v1.2.18
+
+---
+
 ## [v1.2.18] — 2026-05-23
 
 Sustaining release focused on LLM cost reduction, reliability, and observability. Zero BREAKING changes — all additive.

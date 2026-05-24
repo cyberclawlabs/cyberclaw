@@ -23,6 +23,7 @@ use cyberclaw_llm::rate_limit_tracker::RateLimitSnapshot;
 use cyberclaw_llm::types::{ChatRequest, Message, Role, ToolCall, ToolDefinition};
 
 use crate::loop_governor::{AgenticLoopGovernor, LoopCtx, LoopDecision, LoopProfile};
+use crate::streaming::{StreamEvent, StreamSink};
 use crate::verify::{VerificationDirective, VerifierChain, VerifyCtx};
 
 // ---------------------------------------------------------------------------
@@ -352,6 +353,11 @@ pub struct DefaultAgenticLoop {
     /// pathological loops (stuck_detector covers repeated identical
     /// behavior beyond that).
     empty_completion_nudged: bool,
+    /// BUG-R8-01 — optional stream sink for emitting `StreamEvent::BudgetUpgraded`
+    /// SSE frames when a dynamic budget tier promotion fires. When `None`,
+    /// the upgrade is still performed and logged via `tracing::info!` but
+    /// no SSE frame is emitted.
+    sink: Option<std::sync::Arc<dyn StreamSink>>,
 }
 
 impl DefaultAgenticLoop {
@@ -372,7 +378,16 @@ impl DefaultAgenticLoop {
             last_user_prompt: String::new(),
             verifier_retry_used: false,
             empty_completion_nudged: false,
+            sink: None,
         }
+    }
+
+    /// BUG-R8-01 — install a [`StreamSink`] to receive `BudgetUpgraded` SSE
+    /// frames when a dynamic budget tier promotion fires. Calling this is
+    /// optional; without it, upgrades are still logged via `tracing::info!`.
+    pub fn with_sink(mut self, sink: std::sync::Arc<dyn StreamSink>) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     /// US-103b — install an [`AgenticLoopGovernor`] on this loop.
@@ -692,7 +707,23 @@ impl AgenticLoop for DefaultAgenticLoop {
                     );
                     self.state.messages = compressed.messages;
                 }
-                LoopDecision::Continue => {}
+                LoopDecision::Continue { upgrade } => {
+                    // BUG-R8-01 — if a budget tier upgrade fired, emit an SSE
+                    // frame to the sink (if installed). The tracing::info! log
+                    // is emitted inside try_upgrade() regardless of sink.
+                    if let Some(ev) = upgrade {
+                        if let Some(ref sink) = self.sink {
+                            let stream_event = StreamEvent::BudgetUpgraded {
+                                from_profile: format!("{:?}", ev.from),
+                                to_profile: format!("{:?}", ev.to),
+                                new_token_ceiling: ev.new_ceiling,
+                            };
+                            // Best-effort: ignore send errors (sink may be
+                            // closed if the client disconnected).
+                            let _ = sink.send(stream_event).await;
+                        }
+                    }
+                }
             }
         }
 

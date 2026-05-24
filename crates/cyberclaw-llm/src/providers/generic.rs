@@ -57,6 +57,38 @@ fn decode_tool_name(name: &str) -> String {
     name.replace("__", ".")
 }
 
+/// Normalize the messages array so all system-role messages are merged into
+/// a single system message at index 0.
+///
+/// MiniMax (and some other OpenAI-compatible providers) reject requests that
+/// contain a `system` role message anywhere other than the very first position
+/// (error 2013: "invalid message role: system" mid-array). The agentic loop
+/// may append `Message::system(...)` to the tail via `add_system_hint` and
+/// the GAP-4 nudge, so we normalize before sending.
+///
+/// Algorithm:
+/// 1. Collect all system messages; join their content with `\n\n`.
+/// 2. Place one merged system message at index 0.
+/// 3. Append all non-system messages in their original relative order.
+fn merge_system_messages(messages: Vec<crate::types::Message>) -> Vec<crate::types::Message> {
+    use crate::types::Role;
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut non_system: Vec<crate::types::Message> = Vec::new();
+    for msg in messages {
+        if msg.role == Role::System {
+            system_parts.push(msg.content.clone());
+        } else {
+            non_system.push(msg);
+        }
+    }
+    let mut out = Vec::with_capacity(non_system.len() + 1);
+    if !system_parts.is_empty() {
+        out.push(crate::types::Message::system(system_parts.join("\n\n")));
+    }
+    out.extend(non_system);
+    out
+}
+
 #[async_trait]
 impl LlmClient for GenericOpenAiClient {
     async fn chat_completion(&self, mut request: ChatRequest) -> LlmResult<ChatResponse> {
@@ -68,6 +100,10 @@ impl LlmClient for GenericOpenAiClient {
                 t.function.name = encode_tool_name(&t.function.name);
             }
         }
+
+        // BUG-CB-17: merge all system-role messages into one at index 0.
+        // MiniMax rejects system messages appearing mid-array (error 2013).
+        request.messages = merge_system_messages(request.messages);
 
         let mut req_builder = self
             .client
@@ -113,6 +149,8 @@ impl LlmClient for GenericOpenAiClient {
                 t.function.name = encode_tool_name(&t.function.name);
             }
         }
+        // BUG-CB-17: merge all system-role messages into one at index 0.
+        request.messages = merge_system_messages(request.messages);
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut req_builder = self
@@ -238,6 +276,7 @@ impl LlmClient for GenericOpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Message, Role};
 
     #[test]
     fn test_generic_client_creation() {
@@ -256,5 +295,52 @@ mod tests {
     fn test_provider_name() {
         let client = GenericOpenAiClient::new(None, "http://localhost:11434/v1").unwrap();
         assert_eq!(client.provider(), "generic");
+    }
+
+    // BUG-CB-17 tests -----------------------------------------------------------
+
+    #[test]
+    fn test_merge_system_messages_combines_multiple_system_into_first_position() {
+        let messages = vec![
+            Message::system("first system"),
+            Message::user("hello"),
+            Message::system("second system appended by add_system_hint"),
+        ];
+        let out = merge_system_messages(messages);
+        assert_eq!(out.len(), 2, "merged: 1 system + 1 user");
+        assert_eq!(out[0].role, Role::System);
+        assert_eq!(
+            out[0].content,
+            "first system\n\nsecond system appended by add_system_hint"
+        );
+        assert_eq!(out[1].role, Role::User);
+        assert_eq!(out[1].content, "hello");
+    }
+
+    #[test]
+    fn test_merge_system_messages_preserves_non_system_order() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+        ];
+        let out = merge_system_messages(messages);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].role, Role::System);
+        assert_eq!(out[1].role, Role::User);
+        assert_eq!(out[1].content, "u1");
+        assert_eq!(out[2].role, Role::Assistant);
+        assert_eq!(out[3].role, Role::User);
+        assert_eq!(out[3].content, "u2");
+    }
+
+    #[test]
+    fn test_merge_system_messages_no_system_returns_unchanged() {
+        let messages = vec![Message::user("hello"), Message::assistant("world")];
+        let out = merge_system_messages(messages);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].role, Role::User);
+        assert_eq!(out[1].role, Role::Assistant);
     }
 }

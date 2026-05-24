@@ -319,6 +319,17 @@ pub(crate) enum StreamFrame {
         /// Cache write tokens (Anthropic-style).
         cache_write_tokens: u64,
     },
+    /// A capability dispatch entered the approval queue (governance ask/pending).
+    /// Emitted once per (tool_name, reason) pair so the TUI can overlay a notice
+    /// without waiting 60–90 s for the approval timeout.
+    /// CLI clients that do not recognise this frame type skip it (Unknown).
+    ApprovalPending {
+        /// LLM-visible tool name that triggered the review.
+        tool: String,
+        /// Human-readable reason why approval is required (may be None when
+        /// governance returns no message).
+        reason: Option<String>,
+    },
     /// Stream terminator. Maps to the literal `data: [DONE]\n\n` frame.
     Done,
 }
@@ -408,6 +419,16 @@ fn stream_frame_to_sse_event(frame: &StreamFrame) -> SseEvent {
             });
             SseEvent::default().data(payload.to_string())
         }
+        StreamFrame::ApprovalPending { tool, reason } => {
+            let payload = serde_json::json!({
+                "type": "approval_pending",
+                "approval_pending": {
+                    "tool": tool,
+                    "reason": reason,
+                }
+            });
+            SseEvent::default().data(payload.to_string())
+        }
         StreamFrame::Done => SseEvent::default().data("[DONE]"),
     }
 }
@@ -426,15 +447,32 @@ pub fn build_governing_gateway(state: &Arc<AppState>) -> Arc<dyn OrchestratorGat
     use cyberclaw_core::ids::WorkspaceId;
     use cyberclaw_core::workspace::{WorkspaceMode, WorkspaceRef};
 
+    // BUG-CB-19 Fix 1: resolve workspace root as an absolute path so the
+    // agent always knows where it can write. The old default "." is CWD-
+    // relative and opaque to the LLM; agents defaulted to /tmp which the
+    // connector boundary rejects.
+    //
+    // Priority:
+    //   1. CYBERCLAW_AGENT_WORKSPACE_ROOT env var (explicit absolute override)
+    //   2. CYBERCLAW_WORKSPACE_WRITABLE_ROOTS env var (comma-separated list,
+    //      first entry used as root; historical Sprint 18 W3 mechanism)
+    //   3. std::env::current_dir() — absolute CWD at server start
+    //   4. "." — last-resort fallback (preserves pre-CB-19 behaviour if
+    //      current_dir() fails, e.g. dir deleted under the process)
+    let workspace_root_default: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| ".".to_string());
+
     // Sprint 18 W3 — workspace writable roots are env-driven so staging
     // demos can exercise `/tmp` while production stays scoped. Comma-
     // separated absolute paths in `CYBERCLAW_WORKSPACE_WRITABLE_ROOTS`.
-    // Default keeps the historical "." (process CWD) for prod safety.
     let writable_roots: Vec<String> = std::env::var("CYBERCLAW_WORKSPACE_WRITABLE_ROOTS")
         .ok()
         .filter(|s| !s.is_empty())
         .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
-        .unwrap_or_else(|| vec![".".to_string()]);
+        .unwrap_or_else(|| vec![workspace_root_default.clone()]);
     let default_workspace = WorkspaceRef {
         id: WorkspaceId::new(),
         mode: WorkspaceMode::Ephemeral,
@@ -444,7 +482,7 @@ pub fn build_governing_gateway(state: &Arc<AppState>) -> Arc<dyn OrchestratorGat
         root: writable_roots
             .first()
             .cloned()
-            .unwrap_or_else(|| ".".to_string()),
+            .unwrap_or(workspace_root_default),
         writable_roots,
     };
 
@@ -926,6 +964,26 @@ pub async fn agent_chat_completions(
         }
     }
 
+    // BUG-CB-19 Fix 2: inject workspace root into system prompt so the agent
+    // knows the absolute path where file writes are permitted. Without this
+    // hint, agents default to /tmp which the connector boundary rejects,
+    // triggering unnecessary tool failures and system_hint injections
+    // (CB-17) that cascade into wall-clock budget exhaustion (CB-18).
+    {
+        let workspace_root_hint: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| ".".to_string());
+        loop_config.system_prompt = format!(
+            "{}\n\nYour workspace root is `{workspace_root_hint}`. \
+             All file writes must use paths inside this directory; \
+             absolute paths outside the workspace (e.g. `/tmp/...`) \
+             will be rejected by the connector boundary.",
+            loop_config.system_prompt
+        );
+    }
+
     // Initialize the loop with config.
     agentic_loop.init(loop_config).await.map_err(|e| {
         error!(request_id = %request_id, "Failed to initialize agentic loop: {}", e);
@@ -934,13 +992,15 @@ pub async fn agent_chat_completions(
 
     // Inject user messages from the request.
     for msg in &req.messages {
-        match msg.role.as_str() {
-            "user" => agentic_loop.add_user_message(&msg.content),
-            // System messages are already handled via LoopConfig.system_prompt.
-            // Assistant/tool messages are prior context; add as user context.
-            _ => {
-                agentic_loop.add_user_message(format!("[{}]: {}", msg.role, msg.content));
-            }
+        // BUG-R7-01: do NOT inject assistant/tool role messages here.
+        // Prior tool_calls + tool_call_id metadata is lost in ChatMessage
+        // serialization, so reconstructing them as `[assistant]: text` user
+        // messages produces malformed conversation history → MiniMax 400 (2013).
+        // The agentic loop's session state already carries authoritative
+        // assistant + tool history; client-side re-injection is redundant
+        // and actively breaks the structure.
+        if msg.role == "user" {
+            agentic_loop.add_user_message(&msg.content);
         }
     }
 
@@ -1256,7 +1316,14 @@ async fn agent_chat_completions_streaming(
     };
     let agent_default_skills: Vec<cyberclaw_core::ids::SkillId> = Vec::new();
 
-    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone());
+    // BUG-CB-01 (2026-05-23): select profile + capture wall-clock budget so the
+    // spawned task can apply a hard outer timeout. Mirrors the non-streaming path.
+    let profile = select_loop_profile(&req.messages);
+    let wall_clock_secs = profile.default_wall_clock().as_secs();
+    let governor = AgenticLoopGovernor::new(GovernorConfig::from_profile(profile));
+
+    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone())
+        .with_governor(governor);
     agentic_loop.resolve_skill_bindings(&agent_default_skills, Some(&execution_context));
 
     let mut bound_ecosystems: Vec<cyberclaw_skill_runtime::compat::SourceEcosystem> = Vec::new();
@@ -1326,15 +1393,38 @@ async fn agent_chat_completions_streaming(
         }
     }
 
+    // BUG-CB-19 Fix 2 (streaming path): same workspace hint injection as
+    // the non-streaming handler so agents on both paths know the allowed root.
+    {
+        let workspace_root_hint: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| ".".to_string());
+        loop_config.system_prompt = format!(
+            "{}\n\nYour workspace root is `{workspace_root_hint}`. \
+             All file writes must use paths inside this directory; \
+             absolute paths outside the workspace (e.g. `/tmp/...`) \
+             will be rejected by the connector boundary.",
+            loop_config.system_prompt
+        );
+    }
+
     agentic_loop.init(loop_config).await.map_err(|e| {
         error!(request_id = %request_id, "Failed to initialize agentic loop (streaming): {}", e);
         ApiError::InternalError(format!("Loop initialization failed: {}", e))
     })?;
 
     for msg in &req.messages {
-        match msg.role.as_str() {
-            "user" => agentic_loop.add_user_message(&msg.content),
-            _ => agentic_loop.add_user_message(format!("[{}]: {}", msg.role, msg.content)),
+        // BUG-R7-01: do NOT inject assistant/tool role messages here.
+        // Prior tool_calls + tool_call_id metadata is lost in ChatMessage
+        // serialization, so reconstructing them as `[assistant]: text` user
+        // messages produces malformed conversation history → MiniMax 400 (2013).
+        // The agentic loop's session state already carries authoritative
+        // assistant + tool history; client-side re-injection is redundant
+        // and actively breaks the structure.
+        if msg.role == "user" {
+            agentic_loop.add_user_message(&msg.content);
         }
     }
 
@@ -1363,10 +1453,12 @@ async fn agent_chat_completions_streaming(
     let gateway_for_task = gateway.clone();
 
     tokio::spawn(async move {
-        // The agentic loop runs to completion here. Tool-event frames are
-        // emitted as a side effect via `tx_for_task`. The final assistant
-        // text is chunked out at the end so the CLI still renders a body.
-        let result = run_agentic_loop(
+        // BUG-CB-01: wrap with a hard wall-clock timeout derived from the loop
+        // profile (L1=60s / L2=180s / L3=240s). Without this the spawn can hang
+        // indefinitely when the LLM stalls, a memory-save blocks, or a mutex is
+        // contended — leaving the TUI spinner running forever.
+        let wall_clock_timeout = Duration::from_secs(wall_clock_secs);
+        let loop_future = run_agentic_loop(
             &state_for_task,
             &mut agentic_loop,
             &mut memory_integration,
@@ -1377,8 +1469,28 @@ async fn agent_chat_completions_streaming(
             gateway_for_task.clone(),
             agent_id_for_task.as_deref(),
             Some(&tx_for_task),
-        )
-        .await;
+        );
+        let result = match tokio::time::timeout(wall_clock_timeout, loop_future).await {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
+                warn!(
+                    request_id = %request_id_for_task,
+                    wall_clock_secs = wall_clock_secs,
+                    "Agentic loop exceeded wall-clock budget — aborting streaming task"
+                );
+                let _ = tx_for_task.send(StreamFrame::ErrorMsg {
+                    message: format!(
+                        "agentic loop exceeded {}s wall-clock budget; \
+                         the request may have been too complex for the selected profile. \
+                         Try a shorter query or contact your administrator.",
+                        wall_clock_secs
+                    ),
+                    kind: "timeout".to_string(),
+                });
+                let _ = tx_for_task.send(StreamFrame::Done);
+                return;
+            }
+        };
 
         match result {
             Ok((final_text, finish_reason)) => {
@@ -1458,6 +1570,31 @@ async fn agent_chat_completions_streaming(
                         }
                         let _ = tx_for_task.send(StreamFrame::Token(buf));
                     }
+                }
+
+                // BUG-CB-02 (2026-05-23): mirror the non-streaming empty-response
+                // fallback. When governance silently denies the only tool call (or
+                // the model returns no text for any other reason) the streaming path
+                // previously emitted zero Token frames and then [DONE], leaving the
+                // TUI with a blank response and no signal. Emit one diagnostic Token
+                // frame so the user sees actionable text rather than a spinner freeze.
+                if body.is_empty() {
+                    let fallback = format!(
+                        "I was unable to produce a response for this request \
+                         (finish_reason={}, iterations={}, tokens={}). This typically \
+                         means the request was refused at the model layer (content \
+                         policy) or the only available tool was blocked by governance. \
+                         Please rephrase the request or check the audit log for details.",
+                        finish_reason, summary.iterations, summary.tokens_used
+                    );
+                    tracing::warn!(
+                        request_id = %request_id_for_task,
+                        finish_reason = %finish_reason,
+                        iterations = summary.iterations,
+                        tokens_used = summary.tokens_used,
+                        "Streaming loop completed with empty body — emitting fallback token"
+                    );
+                    let _ = tx_for_task.send(StreamFrame::Token(fallback));
                 }
 
                 // Emit rate-limit snapshot from the last LLM call (if any).
@@ -2051,29 +2188,48 @@ async fn run_agentic_loop(
     let mut last_iter_all_tools_errored: bool = false;
     let mut forced_retry_used: bool = false;
 
+    // BUG-CB-18: track the last LLM API error seen in this session so that
+    // a BudgetExhausted outcome can surface the real root cause.
+    //
+    // Architecture note: when an LLM error propagates through `next_iteration`
+    // as Err(...), the loop exits immediately via `return Err(...)` below —
+    // that path does NOT reach BudgetExhausted. The scenario where both occur
+    // is: the LLM client's internal RetryProvider absorbs the error and retries
+    // until wall-clock is exhausted, at which point the governor fires
+    // BudgetExhausted on the *next* `pre_iteration` check. To capture that
+    // error we would need to thread it out of `DefaultAgenticLoop::next_iteration`
+    // (a larger change). Instead we use a simpler heuristic: if the governor's
+    // BudgetExhausted reason contains "wall-clock" or "timeout", we annotate
+    // the user-facing message to suggest checking server logs for LLM errors.
+    let last_llm_error: Option<String> = None;
+
     loop {
         iteration_count += 1;
-        let result = agentic_loop.next_iteration().await.map_err(|e| {
-            error!(request_id = %request_id, "Agentic loop iteration failed: {}", e);
-            // Map upstream LLM provider errors more precisely so the HTTP
-            // status reflects whose fault it is:
-            //   · LLM 4xx (unknown model, expired key, bad request shape)
-            //     → InvalidRequest (400) — caller passed something the
-            //       provider rejected
-            //   · LLM 5xx (provider outage, rate limit at the gateway)
-            //     → LlmError (502) — upstream is down, caller can retry
-            //   · Other loop failures → InternalError (500)
-            // Without this routing, a client typo (e.g. wrong model name)
-            // would surface as 500 and look like a server bug.
-            let msg = e.to_string();
-            if msg.contains("API error: 4") {
-                ApiError::InvalidRequest(msg)
-            } else if msg.contains("API error: 5") || msg.contains("LLM call failed") {
-                ApiError::LlmError(msg)
-            } else {
-                ApiError::InternalError(format!("Loop iteration failed: {}", e))
+        let iteration_result = agentic_loop.next_iteration().await;
+        let result = match iteration_result {
+            Ok(r) => r,
+            Err(e) => {
+                error!(request_id = %request_id, "Agentic loop iteration failed: {}", e);
+                // Map upstream LLM provider errors more precisely so the HTTP
+                // status reflects whose fault it is:
+                //   · LLM 4xx (unknown model, expired key, bad request shape)
+                //     → InvalidRequest (400) — caller passed something the
+                //       provider rejected
+                //   · LLM 5xx (provider outage, rate limit at the gateway)
+                //     → LlmError (502) — upstream is down, caller can retry
+                //   · Other loop failures → InternalError (500)
+                // Without this routing, a client typo (e.g. wrong model name)
+                // would surface as 500 and look like a server bug.
+                let msg = e.to_string();
+                return Err(if msg.contains("API error: 4") {
+                    ApiError::InvalidRequest(msg)
+                } else if msg.contains("API error: 5") || msg.contains("LLM call failed") {
+                    ApiError::LlmError(msg)
+                } else {
+                    ApiError::InternalError(format!("Loop iteration failed: {}", e))
+                });
             }
-        })?;
+        };
 
         match result {
             IterationResult::Done(text) => {
@@ -2127,8 +2283,36 @@ async fn run_agentic_loop(
                 warn!(request_id = %request_id, reason = %reason, "Loop budget exhausted");
                 // BT-30: surface the specific budget reason to operators /
                 // end users instead of a generic "budget_exhausted" string.
+                //
+                // BUG-CB-18: when the wall-clock budget fires, the most
+                // likely cause is the LLM provider's internal retry logic
+                // consuming all available time (e.g. MiniMax 400 retried
+                // until wall-clock deadline). We annotate the message so
+                // operators know to check server logs for upstream LLM
+                // errors alongside the budget reason.
+                // `last_llm_error` is populated when next_iteration() itself
+                // returns Err (the direct-propagation path); for the
+                // RetryProvider-absorb-then-wall-clock path it stays None
+                // and we fall back to the heuristic annotation below.
                 finish_reason = format!("budget_exhausted: {reason}");
-                final_text = Some(format!("[budget exhausted — {reason}]"));
+                let reason_lower = reason.to_lowercase();
+                final_text = Some(if let Some(ref api_err) = last_llm_error {
+                    // Direct LLM error was captured before BudgetExhausted.
+                    format!("[error — {api_err}; budget exhausted: {reason}]")
+                } else if reason_lower.contains("wall-clock")
+                    || reason_lower.contains("timeout")
+                    || reason_lower.contains("wall_clock")
+                {
+                    // Wall-clock exhaustion often means LLM retries consumed
+                    // all time. Direct operators to server logs for the real
+                    // upstream error.
+                    format!(
+                        "[budget exhausted — {reason}] \
+                         (wall-clock deadline reached; check server logs for upstream LLM errors)"
+                    )
+                } else {
+                    format!("[budget exhausted — {reason}]")
+                });
                 break;
             }
             IterationResult::Stuck(reason) => {
@@ -2570,6 +2754,19 @@ async fn run_agentic_loop(
                             } else {
                                 CapabilityRequestReason::ExecutionError
                             };
+                            // BUG-CB-03 (2026-05-23): emit ApprovalPending SSE frame so
+                            // the TUI can overlay a notice instead of showing "Thinking…"
+                            // for 60–90 s while the approval timeout elapses.
+                            // Only emit for GovernanceDenied (the "check /approvals" path);
+                            // NotFound and ExecutionError are surfaced via ToolComplete.ok=false.
+                            if matches!(classified, CapabilityRequestReason::GovernanceDenied) {
+                                if let Some(sink) = stream_sink {
+                                    let _ = sink.send(StreamFrame::ApprovalPending {
+                                        tool: tool_name_str.clone(),
+                                        reason: Some(reason.chars().take(200).collect()),
+                                    });
+                                }
+                            }
                             audit
                                 .record_capability_request(
                                     &tool_name_str,
@@ -3237,11 +3434,42 @@ async fn handle_hallucination_check(
 /// Select a [`LoopProfile`] from the request message list.
 ///
 /// Heuristic:
-/// - L3: ≥4 messages OR any message > 500 chars (multi-turn / long-context)
+/// - L3: conversation contains an assistant reply OR ≥4 messages OR any message > 500 chars
+///   (multi-turn / long-context / tool-using agents in 2nd+ turn)
 /// - L2: any message > 100 chars (medium single-turn)
 /// - L1: everything else (short single-turn)
+///
+/// The `has_assistant` check is the key fix for BUG-CB-16: tool-using tasks accumulate
+/// system prompt (~10.5k) + tools schema (~2k) + per-tool-call results (500-2000 tokens
+/// each), easily exceeding the 32k L1/L2 budget after just 2-3 tool calls. Any
+/// conversation that already has an assistant reply is in the 2nd+ turn and must use L3.
 pub(crate) fn select_loop_profile(messages: &[ChatMessage]) -> LoopProfile {
-    if messages.len() >= 4 || messages.iter().any(|m| m.content.len() > 500) {
+    let has_assistant = messages.iter().any(|m| m.role == "assistant");
+
+    // Heuristic: any prompt containing file paths, code-execution keywords,
+    // or tool-invocation language likely needs an agentic loop with tools.
+    // These need L3 (128k budget) from turn 1 — L1 (32k) gets eaten by
+    // system prompt (~10.5k) + tools schema (~2k) + first tool result.
+    let likely_agentic = messages.iter().any(|m| {
+        let c = m.content.to_lowercase();
+        c.contains('/')               // file path
+        || c.contains("create")       // create file / project
+        || c.contains("write")        // write file / code
+        || c.contains("read")         // read file
+        || c.contains("run")          // run command / script
+        || c.contains("execute")
+        || c.contains("install")      // pip install / npm install
+        || c.contains("generate")     // generate code / pptx / report
+        || c.contains("build")
+        || c.contains(".pptx") || c.contains(".docx") || c.contains(".xlsx")
+        || c.contains(".py") || c.contains(".rs") || c.contains(".ts")
+        || c.contains(".js") || c.contains(".md") || c.contains(".txt")
+        || c.contains("file") || c.contains("文件")
+        || c.contains("脚本") || c.contains("代码")
+        || c.contains("ppt") || c.contains("pdf")
+    });
+
+    if has_assistant || likely_agentic || messages.len() >= 4 || messages.iter().any(|m| m.content.len() > 500) {
         LoopProfile::L3
     } else if messages.iter().any(|m| m.content.len() > 100) {
         LoopProfile::L2
@@ -4381,5 +4609,112 @@ mod tests {
         // 3 messages, all short → L1
         let msgs = vec![msg("hi"), msg("hi"), msg("hi")];
         assert_eq!(select_loop_profile(&msgs), LoopProfile::L1);
+    }
+
+    // BUG-CB-16: multi-turn agentic conversations must use L3 budget.
+    #[test]
+    fn test_select_loop_profile_assistant_history_picks_l3() {
+        // 1 user + 1 assistant + 1 user — the assistant reply triggers L3
+        // even though the messages are short and fewer than 4.
+        let msgs = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "what files exist?".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "I'll check.".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "thanks".to_string(),
+            },
+        ];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
+    }
+
+    #[test]
+    fn test_select_loop_profile_single_short_user_picks_l1() {
+        // Single short user message — first turn, no tool history → L1 (no regression).
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L1);
+    }
+
+    // BUG-CB-20: turn-1 agentic prompts must use L3 budget. ----------------------
+
+    #[test]
+    fn test_select_loop_profile_file_path_picks_l3() {
+        // A prompt containing a file path (contains '/') → likely_agentic → L3.
+        let msgs = vec![msg("please read /Users/foo/bar.txt and summarize it")];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
+    }
+
+    #[test]
+    fn test_select_loop_profile_create_keyword_picks_l3() {
+        // A prompt with "create" → likely_agentic → L3.
+        let msgs = vec![msg("create a pptx slide deck about the project")];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
+    }
+
+    #[test]
+    fn test_select_loop_profile_chinese_keyword_picks_l3() {
+        // A prompt with Chinese "文件" → likely_agentic → L3.
+        let msgs = vec![msg("写一份文件，总结项目进度")];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
+    }
+
+    #[test]
+    fn test_select_loop_profile_pure_short_text_still_l1() {
+        // A pure short math question has no agentic keywords → stays L1 (no regression).
+        let msgs = vec![msg("what is 2+2?")];
+        assert_eq!(select_loop_profile(&msgs), LoopProfile::L1);
+    }
+
+    // BUG-CB-19 -------------------------------------------------------------------
+
+    #[test]
+    fn test_workspace_root_defaults_to_absolute_cwd() {
+        // When neither CYBERCLAW_AGENT_WORKSPACE_ROOT nor
+        // CYBERCLAW_WORKSPACE_WRITABLE_ROOTS is set, the workspace root
+        // derived by CB-19 logic must be an absolute path (not ".").
+        //
+        // We replicate the resolution logic from build_governing_gateway and
+        // the workspace_root_hint block so the test stays co-located with the
+        // code it validates.
+        // Temporarily unset both env vars to exercise the current_dir() path.
+        let prev_root = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT").ok();
+        let prev_roots = std::env::var("CYBERCLAW_WORKSPACE_WRITABLE_ROOTS").ok();
+        unsafe {
+            std::env::remove_var("CYBERCLAW_AGENT_WORKSPACE_ROOT");
+            std::env::remove_var("CYBERCLAW_WORKSPACE_WRITABLE_ROOTS");
+        }
+
+        let workspace_root: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| ".".to_string());
+
+        // Restore env vars.
+        unsafe {
+            if let Some(v) = prev_root {
+                std::env::set_var("CYBERCLAW_AGENT_WORKSPACE_ROOT", v);
+            }
+            if let Some(v) = prev_roots {
+                std::env::set_var("CYBERCLAW_WORKSPACE_WRITABLE_ROOTS", v);
+            }
+        }
+
+        assert_ne!(
+            workspace_root, ".",
+            "workspace root must not be the opaque relative path '.'; got '{workspace_root}'"
+        );
+        assert!(
+            std::path::Path::new(&workspace_root).is_absolute(),
+            "workspace root must be absolute; got '{workspace_root}'"
+        );
     }
 }

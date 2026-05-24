@@ -298,11 +298,19 @@ pub async fn search(
         .no_proxy()
         .build()?;
 
-    // Pick provider. If the caller passed an explicit `endpoint`,
-    // assume DuckDuckGo-shaped JSON (this preserves existing behaviour
-    // and lets tests point at a mock server). Otherwise consult the
-    // env var.
-    let provider = if input.endpoint.is_some() {
+    // Pick provider. Only force DuckDuckGo when the caller passed an explicit
+    // endpoint that looks like a DDG URL (contains "duckduckgo"). This preserves
+    // the existing mock-server test behaviour while letting WEB_SEARCH_PROVIDER=exa
+    // (or any other value) take effect even when an endpoint override is present.
+    // BUG-CB-05: previously any input.endpoint = Some(_) forced DuckDuckGo,
+    // silently ignoring the env var and sending all requests through DDG/CoinGecko
+    // fallback chains that are fully blocked in many network environments.
+    let provider = if input
+        .endpoint
+        .as_deref()
+        .map(|ep| ep.to_ascii_lowercase().contains("duckduckgo"))
+        .unwrap_or(false)
+    {
         SearchProvider::DuckDuckGo
     } else {
         SearchProvider::from_env()
@@ -662,5 +670,36 @@ mod tests {
             println!("- {} | {}", r.title, r.url);
         }
         println!("Exa returned {} results — BT-06 verified", results.len());
+    }
+
+    // BUG-CB-05: Verify endpoint-to-provider selection logic.
+    // The fixed rule: only force DuckDuckGo when the endpoint URL contains
+    // "duckduckgo"; otherwise let WEB_SEARCH_PROVIDER drive provider selection.
+
+    #[test]
+    fn test_endpoint_with_ddg_url_uses_ddg_provider() {
+        let endpoint = Some("https://api.duckduckgo.com/".to_string());
+        let forces_ddg = endpoint
+            .as_deref()
+            .map(|ep| ep.to_ascii_lowercase().contains("duckduckgo"))
+            .unwrap_or(false);
+        assert!(
+            forces_ddg,
+            "An endpoint containing 'duckduckgo' should force DuckDuckGo provider"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_with_exa_url_does_not_force_ddg() {
+        let endpoint = Some("https://api.exa.ai/search".to_string());
+        let forces_ddg = endpoint
+            .as_deref()
+            .map(|ep| ep.to_ascii_lowercase().contains("duckduckgo"))
+            .unwrap_or(false);
+        assert!(
+            !forces_ddg,
+            "An endpoint not containing 'duckduckgo' must not force DDG provider; \
+             WEB_SEARCH_PROVIDER should drive selection instead"
+        );
     }
 }

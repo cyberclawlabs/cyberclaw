@@ -20,7 +20,7 @@
 //! - `OverlayState::SlashHelp`   — /help 帮助面板
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
@@ -269,6 +269,11 @@ pub enum RenderMode {
 struct TuiApp<'a> {
     history: Vec<MessageBlock>,
     scroll_offset: u16,
+    /// true = 新消息到达时自动 pin 到底部（默认 live tail 行为）。
+    /// 用户手动 PgUp/Home 时置 false；End 键恢复 true。
+    conversation_auto_pin: bool,
+    /// 最近一帧渲染计算出的对话区视口高度（行数），供半页跳转使用。
+    conversation_viewport_height: u16,
     textarea: TextArea<'a>,
     model: String,
     conv_id: String,
@@ -321,6 +326,8 @@ impl<'a> TuiApp<'a> {
         Self {
             history: Vec::new(),
             scroll_offset: 0,
+            conversation_auto_pin: true,
+            conversation_viewport_height: 0,
             textarea,
             model,
             conv_id,
@@ -452,6 +459,10 @@ impl<'a> TuiApp<'a> {
         self.stream_start_tick = None;
         if let Some(block) = self.history.last_mut() {
             block.streaming = false;
+            // BUG-CB-14: assistant 时间戳之前 = user 提交时刻（placeholder
+            // 在 begin_assistant 时 set 后再未更新），导致 you 和 assistant
+            // 时间戳完全相同。修正为流结束时刻 = 实际回复完成时间。
+            block.ts = Utc::now();
         }
     }
 
@@ -506,7 +517,16 @@ impl<'a> TuiApp<'a> {
         });
     }
 
+    /// 仅当 auto-pin 开启时才跳到底部——保护正在阅读历史的用户。
     fn scroll_to_bottom(&mut self) {
+        if self.conversation_auto_pin {
+            self.scroll_offset = u16::MAX;
+        }
+    }
+
+    /// 强制跳到底部并重新开启 auto-pin（End 键调用）。
+    fn scroll_to_bottom_force(&mut self) {
+        self.conversation_auto_pin = true;
         self.scroll_offset = u16::MAX;
     }
 
@@ -775,18 +795,55 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
     terminal.draw(|f| {
         let size = f.area();
 
+        // BUG-CB-11: 顶部固定 banner（3 行含 border）+ 对话区 + 状态条 + 输入区
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(3), // banner block（含上下 border）
                 Constraint::Min(10),
                 Constraint::Length(1),
                 Constraint::Length(8),
             ])
             .split(size);
 
+        // --- Banner 区（BUG-CB-11）---
+        let conv_short_banner = if app.conv_id.len() > 8 {
+            format!("{}…", &app.conv_id[..8])
+        } else {
+            app.conv_id.clone()
+        };
+        let banner_text = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "⚡ CYBERCLAW",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(COLOR_MUTED),
+            ),
+            Span::styled("  │  ", Style::default().fg(COLOR_BORDER)),
+            Span::styled(app.model.clone(), Style::default().fg(COLOR_PRIMARY)),
+            Span::styled("  │  ", Style::default().fg(COLOR_BORDER)),
+            Span::styled(
+                format!("conv_{}", conv_short_banner),
+                Style::default().fg(COLOR_MUTED),
+            ),
+        ]);
+        let banner_block = Paragraph::new(banner_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(COLOR_BORDER)),
+        );
+        f.render_widget(banner_block, chunks[0]);
+
         // --- 历史区 ---
-        let history_height = chunks[0].height.saturating_sub(2) as usize;
-        let history_width = chunks[0].width.saturating_sub(4) as usize;
+        let history_height = chunks[1].height.saturating_sub(2) as usize;
+        let history_width = chunks[1].width.saturating_sub(4) as usize;
+        // BUG-CB-10: 记录视口高度供键盘半页跳转使用
+        app.conversation_viewport_height = history_height as u16;
 
         let mut all_lines: Vec<Line> = Vec::new();
         for block in &app.history {
@@ -822,7 +879,8 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                 ),
                 _ => ("·", "system", Style::default().fg(COLOR_MUTED)),
             };
-            let ts = block.ts.format("%H:%M:%S").to_string();
+            // BUG-CB-15: 显示用户本地时区，存储仍为 UTC（保持 audit/log 一致）
+            let ts = block.ts.with_timezone(&Local).format("%H:%M:%S").to_string();
             let mut header_spans = vec![
                 Span::styled(format!("{} ", glyph), role_style),
                 Span::styled(role_label.to_string(), role_style),
@@ -913,16 +971,24 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
             app.scroll_offset = max_scroll as u16;
         }
 
+        // BUG-CB-10: 滚屏指示器——用户不在底部时在标题显示提示
+        let is_at_bottom = app.scroll_offset as usize >= max_scroll;
+        let conv_title = if !is_at_bottom {
+            " conversation  ⬆ scrolled — End 回到 live "
+        } else {
+            " conversation "
+        };
+
         let paragraph = Paragraph::new(all_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" conversation "),
+                    .title(conv_title),
             )
             .wrap(Wrap { trim: false })
             .scroll((app.scroll_offset, 0));
 
-        f.render_widget(paragraph, chunks[0]);
+        f.render_widget(paragraph, chunks[1]);
 
         // --- 状态条 ---
         let conv_short = if app.conv_id.len() > 8 {
@@ -961,7 +1027,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
         };
         let status_bar = Paragraph::new(status_text)
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
-        f.render_widget(status_bar, chunks[1]);
+        f.render_widget(status_bar, chunks[2]);
 
         // --- 输入区（终端风格：外框 + 内部 prompt 行 + textarea） ---
         let conv_short_for_prompt = if app.conv_id.len() > 12 {
@@ -975,12 +1041,12 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
             .title(Line::from(vec![
                 Span::raw(" "),
                 Span::styled(
-                    "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史 · /help · Ctrl+C 退出 ",
+                    "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史 · PgUp/PgDn 滚屏 · /help · Ctrl+C 退出 ",
                     Style::default().fg(COLOR_MUTED),
                 ),
             ]));
-        let input_inner = input_outer.inner(chunks[2]);
-        f.render_widget(input_outer, chunks[2]);
+        let input_inner = input_outer.inner(chunks[3]);
+        f.render_widget(input_outer, chunks[3]);
 
         // 计算 slash autocomplete dropdown（如有 / 前缀匹配）
         let current_input_text = app.textarea.lines().join("\n");
@@ -1573,11 +1639,26 @@ pub async fn run_tui(
                                     app.set_textarea_text(&new_text);
                                 }
                             }
+                            // BUG-CB-10: PgUp/PgDn 半页跳转 + auto-pin 控制
                             (_, KeyCode::PageUp) => {
-                                app.scroll_offset = app.scroll_offset.saturating_sub(10);
+                                let half = (app.conversation_viewport_height / 2).max(3);
+                                app.scroll_offset = app.scroll_offset.saturating_sub(half);
+                                // 向上滚动时关闭 auto-pin，保护阅读位置
+                                app.conversation_auto_pin = false;
                             }
                             (_, KeyCode::PageDown) => {
-                                app.scroll_offset = app.scroll_offset.saturating_add(10);
+                                let half = (app.conversation_viewport_height / 2).max(3);
+                                app.scroll_offset = app.scroll_offset.saturating_add(half);
+                                // draw() 会 clamp；End 键才明确重开 auto-pin
+                            }
+                            (_, KeyCode::Home) => {
+                                // 跳到对话顶部
+                                app.scroll_offset = 0;
+                                app.conversation_auto_pin = false;
+                            }
+                            (_, KeyCode::End) => {
+                                // 跳回底部并恢复 live tail
+                                app.scroll_to_bottom_force();
                             }
                             _ => {
                                 app.textarea.input(ev.clone());
@@ -1612,7 +1693,35 @@ pub async fn run_tui(
                 }
                 Ok(TokenEvent::Error(e)) => {
                     app.finish_streaming();
-                    app.push_system(format!("[错误] {}", e));
+                    // BUG-CB-08: detect auth-class errors and append a helpful
+                    // hint so users know to refresh their token.
+                    let lower = e.to_lowercase();
+                    let is_auth_error = lower.contains("expiredsignature")
+                        || lower.contains("401")
+                        || lower.contains("unauthorized");
+                    let friendly_hint = if is_auth_error {
+                        Some("\n提示：JWT 已过期，请运行 `rm ~/.cyberclaw/cli-token` 后重新执行 `cyberclaw onboard` 获取新令牌。")
+                    } else {
+                        None
+                    };
+                    let display = match friendly_hint {
+                        Some(hint) => format!("[错误] {}{}", e, hint),
+                        None => format!("[错误] {}", e),
+                    };
+                    app.push_system(display);
+                    // BUG-CB-09: on auth-class errors, drop any queued messages
+                    // so they are not auto-replayed on the next streaming attempt
+                    // (which would fail again with the same 401 silently).
+                    if is_auth_error {
+                        let dropped = app.input_queue.len();
+                        if dropped > 0 {
+                            app.input_queue.clear();
+                            app.push_system(format!(
+                                "[queue] {} 条排队消息已丢弃（认证失败）",
+                                dropped
+                            ));
+                        }
+                    }
                 }
                 Ok(TokenEvent::Clarify(payload)) => {
                     let mut lines = vec![format!("[澄清请求] id={}", payload.id)];
@@ -2476,7 +2585,7 @@ fn save_history_to_file(app: &TuiApp, path: &str) -> Result<()> {
             "assistant" => "**Assistant**",
             _ => "**System**",
         };
-        let ts = block.ts.format("%Y-%m-%d %H:%M:%S UTC");
+        let ts = block.ts.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S %Z");
         out.push_str(&format!("### {} — {}\n\n{}\n\n", role, ts, block.content));
         out.push_str("---\n\n");
     }
@@ -2527,6 +2636,42 @@ mod tests {
             app.show_tool_details,
             "show_tool_details default must be true (hermes parity)"
         );
+        // BUG-CB-10: auto-pin 默认开启（live tail 行为）
+        assert!(
+            app.conversation_auto_pin,
+            "conversation_auto_pin must default to true"
+        );
+        assert_eq!(
+            app.conversation_viewport_height, 0,
+            "viewport_height starts at 0 before first draw"
+        );
+    }
+
+    #[test]
+    fn scroll_auto_pin_suppresses_scroll_to_bottom() {
+        // BUG-CB-10: 关闭 auto-pin 后 scroll_to_bottom() 不再强制跳底
+        let mut app = fresh_app();
+        app.scroll_offset = 42;
+        app.conversation_auto_pin = false;
+        app.scroll_to_bottom();
+        assert_eq!(
+            app.scroll_offset, 42,
+            "scroll_to_bottom must be no-op when auto_pin=false"
+        );
+    }
+
+    #[test]
+    fn scroll_to_bottom_force_restores_pin() {
+        // BUG-CB-10: End 键调用 scroll_to_bottom_force() 恢复 auto-pin
+        let mut app = fresh_app();
+        app.conversation_auto_pin = false;
+        app.scroll_offset = 42;
+        app.scroll_to_bottom_force();
+        assert!(
+            app.conversation_auto_pin,
+            "force must restore auto_pin=true"
+        );
+        assert_eq!(app.scroll_offset, u16::MAX, "force must set offset to u16::MAX");
     }
 
     #[test]

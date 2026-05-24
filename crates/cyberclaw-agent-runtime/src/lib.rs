@@ -48,7 +48,8 @@ pub use context_compressor::{
 };
 
 pub use loop_governor::{
-    AgenticLoopGovernor, CostTracker, GovernorConfig, LoopCtx, LoopDecision, LoopProfile,
+    AgenticLoopGovernor, BudgetUpgradeEvent, CostTracker, GovernorConfig, LoopCtx, LoopDecision,
+    LoopProfile,
 };
 
 pub use verify::{

@@ -722,6 +722,29 @@ static PREFIX_TABLE: Lazy<Vec<(&'static str, PricingEntry)>> = Lazy::new(|| {
                 cache_write_per_million_usd: None,
             },
         ),
+        // MiniMax prefix groups
+        // MiniMax-M2.7-HighSpeed lowercases to "minimax-m2.7-highspeed" which
+        // doesn't match the exact "minimax-m2.7" entry — catch all m2.* variants.
+        (
+            "minimax-m2",
+            PricingEntry {
+                input_per_million_usd: 0.30,
+                output_per_million_usd: 1.20,
+                cache_read_per_million_usd: None,
+                cache_write_per_million_usd: None,
+            },
+        ),
+        // abab-* prefix covers abab-6.5-chat, abab-6.5s-chat and future variants.
+        // Use abab-6.5-chat pricing ($0.30/$1.20) as the conservative fallback.
+        (
+            "abab-",
+            PricingEntry {
+                input_per_million_usd: 0.30,
+                output_per_million_usd: 1.20,
+                cache_read_per_million_usd: None,
+                cache_write_per_million_usd: None,
+            },
+        ),
         // Ark prefix groups
         (
             "ark-deepseek-v3",
@@ -1063,5 +1086,33 @@ mod tests {
         assert!(entry.is_some());
         let e = entry.unwrap();
         assert!((e.input_per_million_usd - 3.00).abs() < 1e-9);
+    }
+
+    // BUG-CB-04: MiniMax-M2.7-HighSpeed and similar variants with a suffix after
+    // "minimax-m2.7" were not matched by the exact "minimax-m2.7" entry in
+    // PRICING_TABLE. The new "minimax-m2" prefix in PREFIX_TABLE covers them.
+    #[test]
+    fn test_lookup_minimax_m2_7_highspeed_finds_pricing() {
+        let entry = lookup_pricing("MiniMax-M2.7-HighSpeed");
+        assert!(
+            entry.is_some(),
+            "MiniMax-M2.7-HighSpeed should resolve via minimax-m2 prefix"
+        );
+        let e = entry.unwrap();
+        assert!((e.input_per_million_usd - 0.30).abs() < 1e-9);
+        assert!((e.output_per_million_usd - 1.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_lookup_minimax_versioned_finds_pricing() {
+        // Exact model name as returned by the MiniMax API, with mixed case.
+        let entry = lookup_pricing("MiniMax-M2.7");
+        assert!(
+            entry.is_some(),
+            "MiniMax-M2.7 should resolve (exact match lowercased to minimax-m2.7)"
+        );
+        let e = entry.unwrap();
+        assert!((e.input_per_million_usd - 0.30).abs() < 1e-9);
+        assert!((e.output_per_million_usd - 1.20).abs() < 1e-9);
     }
 }

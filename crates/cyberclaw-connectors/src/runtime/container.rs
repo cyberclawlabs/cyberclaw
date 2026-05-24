@@ -392,8 +392,9 @@ impl ContainerRuntime {
     /// Validate command arguments (防止注入)
     fn validate_args(args: &[String]) -> anyhow::Result<()> {
         for arg in args {
-            // Check for control characters (except tab which is sometimes needed)
-            if arg.contains(|c: char| c.is_control() && c != '\t') {
+            // Check for control characters (except tab, newline, carriage-return which are
+            // legitimate in heredoc / multi-line shell scripts passed as `bash -c` arguments)
+            if arg.contains(|c: char| c.is_control() && c != '\t' && c != '\n' && c != '\r') {
                 anyhow::bail!("argument contains control characters: {}", arg);
             }
 
@@ -854,6 +855,31 @@ mod tests {
         assert!(
             ContainerRuntime::validate_path(bad2).is_err(),
             "embedded traversal should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_args_allows_heredoc_with_newlines() {
+        // Multi-line bash scripts passed as `bash -c` args must be accepted.
+        // \n and \r are legitimate in heredoc / multi-line shell arguments.
+        let args = vec![
+            "pip install requests".to_string(),
+            "python3 - << 'EOF'\nprint('hello')\nEOF".to_string(),
+            "echo\r\nok".to_string(),
+        ];
+        assert!(
+            ContainerRuntime::validate_args(&args).is_ok(),
+            "heredoc / multi-line args with \\n and \\r should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_args_still_rejects_null_byte() {
+        // Null bytes are genuine injection vectors and must remain rejected.
+        let args = vec!["safe-arg".to_string(), "evil\x00arg".to_string()];
+        assert!(
+            ContainerRuntime::validate_args(&args).is_err(),
+            "argument containing null byte should be rejected"
         );
     }
 }

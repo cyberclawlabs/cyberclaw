@@ -99,6 +99,14 @@ pub enum SseFrame {
     RateLimit(SseRateLimit),
     /// Token usage snapshot from the server (for cost estimation).
     Usage(SseUsage),
+    /// A tool call entered the governance approval queue.
+    /// BUG-CB-03: emitted by the server when a capability dispatch is
+    /// governance-denied so the TUI can overlay a notice instead of
+    /// showing "Thinking…" for 60-90 s while the approval timeout elapses.
+    ApprovalPending {
+        tool: String,
+        reason: Option<String>,
+    },
     /// 流结束
     Done,
     /// 未知帧（跳过）
@@ -383,6 +391,19 @@ pub fn parse_sse_data(data: &str) -> SseFrame {
             }
             SseFrame::Unknown
         }
+        // BUG-CB-03: governance approval-pending notification.
+        Some("approval_pending") => {
+            if let Some(ap) = v.get("approval_pending") {
+                let tool = ap
+                    .get("tool")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let reason = ap.get("reason").and_then(|r| r.as_str()).map(String::from);
+                return SseFrame::ApprovalPending { tool, reason };
+            }
+            SseFrame::Unknown
+        }
         _ => {
             // token 帧：{"choices":[{"delta":{"content":"..."}}]}
             if let Some(content) = v
@@ -408,11 +429,35 @@ where
 {
     let mut byte_stream = response.bytes_stream();
     let mut buf = String::new();
+    // BUG-CB-07: carry partial multi-byte sequences (e.g. CJK / emoji) across
+    // chunk boundaries.  reqwest splits on TCP packet boundaries, not UTF-8
+    // char boundaries, so a 2/3/4-byte codepoint can straddle two chunks.
+    let mut residual: Vec<u8> = Vec::new();
 
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.context("读取 SSE 字节流失败")?;
-        let text = std::str::from_utf8(&chunk).context("SSE 字节非 UTF-8")?;
-        buf.push_str(text);
+        residual.extend_from_slice(&chunk);
+
+        // Decode only the valid UTF-8 prefix; keep the trailing incomplete
+        // byte sequence in `residual` for the next iteration.
+        let valid_text = match std::str::from_utf8(&residual) {
+            Ok(s) => {
+                let owned = s.to_string();
+                residual.clear();
+                owned
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                // SAFETY: valid_up_to is always a valid char boundary by
+                // definition of Utf8Error.
+                let s = std::str::from_utf8(&residual[..valid_up_to])
+                    .expect("valid_up_to guarantees valid UTF-8")
+                    .to_string();
+                residual = residual[valid_up_to..].to_vec();
+                s
+            }
+        };
+        buf.push_str(&valid_text);
 
         // 按 "\n\n" 分割事件块
         while let Some(pos) = buf.find("\n\n") {
@@ -557,6 +602,21 @@ async fn send_message(
             // Usage info is silently ignored in the legacy REPL path;
             // cost tracking is only active in the TUI (TokenEvent::Usage).
             SseFrame::Usage(_) => true,
+            // BUG-CB-03: print an inline notice in the legacy REPL.
+            SseFrame::ApprovalPending { tool, reason } => {
+                match reason.as_deref() {
+                    Some(r) => println!(
+                        "\n[!] Awaiting approval for {} ({}) — check /approvals",
+                        tool, r
+                    ),
+                    None => println!(
+                        "\n[!] Awaiting approval for {} — check /approvals",
+                        tool
+                    ),
+                }
+                let _ = io::stdout().flush();
+                true
+            }
             SseFrame::Done => false,
             SseFrame::Unknown => true,
         }
@@ -853,6 +913,24 @@ pub async fn send_message_tui(
                 let _ = tok.try_send(chat_tui::TokenEvent::Usage(u));
                 true
             }
+            // BUG-CB-03: governance approval-pending notice.
+            // Augment the spinner with an inline token so the user sees
+            // "⏳ Awaiting approval for {tool} — check /approvals" without
+            // replacing the assistant message being built.
+            SseFrame::ApprovalPending { tool, reason } => {
+                let notice = match reason.as_deref() {
+                    Some(r) => format!(
+                        "\n\u{23f3} Awaiting approval for {} ({}) — check /approvals\n",
+                        tool, r
+                    ),
+                    None => format!(
+                        "\n\u{23f3} Awaiting approval for {} — check /approvals\n",
+                        tool
+                    ),
+                };
+                let _ = tok.try_send(chat_tui::TokenEvent::Token(notice));
+                true
+            }
             SseFrame::Done => false,
             SseFrame::Unknown => true,
         }
@@ -899,9 +977,17 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     };
 
     // 2. 解析/创建 conversation
-    // 优先级: --conversation > --resume (旧参数) > ~/.cyberclaw/last-conversation > 新建
+    // 优先级: --new > --conversation > --resume (旧参数) > ~/.cyberclaw/last-conversation > 新建
+    // --new 始终胜出：若同时传了 --conversation/--resume，发出 warn 并忽略它们
     let conv_id = {
-        let explicit_id = args.conversation.or(args.resume);
+        let explicit_id = if args.new {
+            if args.conversation.is_some() || args.resume.is_some() {
+                eprintln!("[warn] --new overrides --conversation/--resume; starting fresh");
+            }
+            None
+        } else {
+            args.conversation.or(args.resume)
+        };
         if let Some(id) = explicit_id {
             // 验证存在
             let url = format!("{}/api/v1/chat/conversations/{}", server, id);
@@ -920,9 +1006,12 @@ pub async fn run(args: ChatArgs) -> Result<()> {
                 anyhow::bail!("conversation {} 不存在或无权限 ({})", id, status);
             }
             id
-        } else if !args.new {
-            // 尝试 resume 上次
-            if let Some(last_id) = chat_tui::load_last_conv_id() {
+        } else {
+            // --new 强制新建，或无显式 ID 时尝试 resume 上次，再兜底新建
+            if args.new {
+                create_conversation(&client, &server, &token, "New Chat", args.agent.as_deref())
+                    .await?
+            } else if let Some(last_id) = chat_tui::load_last_conv_id() {
                 let url = format!("{}/api/v1/chat/conversations/{}", server, last_id);
                 let resp = client.get(&url).bearer_auth(&token).send().await;
                 match resp {
@@ -943,9 +1032,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
                 create_conversation(&client, &server, &token, "New Chat", args.agent.as_deref())
                     .await?
             }
-        } else {
-            // --new 强制新建
-            create_conversation(&client, &server, &token, "New Chat", args.agent.as_deref()).await?
         }
     };
 
@@ -1249,5 +1335,76 @@ mod tests {
     fn test_parse_sse_frame_unknown() {
         let frame = parse_sse_data("not json at all");
         assert!(matches!(frame, SseFrame::Unknown));
+    }
+
+    // BUG-CB-03 tests
+
+    #[test]
+    fn test_parse_approval_pending_frame_serializes_correctly() {
+        let data = r#"{"type":"approval_pending","approval_pending":{"tool":"fs.write","reason":"Path outside workspace"}}"#;
+        let frame = parse_sse_data(data);
+        match frame {
+            SseFrame::ApprovalPending { tool, reason } => {
+                assert_eq!(tool, "fs.write");
+                assert_eq!(reason.as_deref(), Some("Path outside workspace"));
+            }
+            other => panic!("expected ApprovalPending, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_sse_frame_type_does_not_crash() {
+        // Forward compat: an unknown frame type must return Unknown, not panic.
+        let data = r#"{"type":"some_future_frame_type_v99","data":{"foo":"bar"}}"#;
+        let frame = parse_sse_data(data);
+        assert!(
+            matches!(frame, SseFrame::Unknown),
+            "Unknown SSE frame types must be silently skipped"
+        );
+    }
+
+    // BUG-CB-07: residual buffer handles split multi-byte chars across chunks.
+    //
+    // We test the core decode logic directly (without a live HTTP response).
+    // The scenario: a 3-byte UTF-8 CJK character is split so that the first
+    // two bytes arrive in chunk A and the third byte arrives in chunk B.
+    // The fix must yield the complete character, not an error.
+    #[test]
+    fn test_stream_sse_handles_split_multi_byte_chars() {
+        // "你" = 0xE4 0xBD 0xA0 (3 bytes)
+        // "好" = 0xE5 0xA5 0xBD (3 bytes)
+        let full = "你好";
+        let bytes = full.as_bytes();
+        assert_eq!(bytes.len(), 6);
+
+        // Split after 2nd byte — first chunk is incomplete UTF-8.
+        let chunk_a = &bytes[..2]; // 0xE4 0xBD — incomplete "你"
+        let chunk_b = &bytes[2..]; // 0xA0 0xE5 0xA5 0xBD — rest of "你" + "好"
+
+        let mut residual: Vec<u8> = Vec::new();
+        let mut assembled = String::new();
+
+        for chunk in [chunk_a, chunk_b] {
+            residual.extend_from_slice(chunk);
+            match std::str::from_utf8(&residual) {
+                Ok(s) => {
+                    assembled.push_str(s);
+                    residual.clear();
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    assembled.push_str(
+                        std::str::from_utf8(&residual[..valid_up_to])
+                            .expect("valid_up_to guarantees valid UTF-8"),
+                    );
+                    residual = residual[valid_up_to..].to_vec();
+                }
+            }
+        }
+
+        // After processing both chunks the residual must be empty and the
+        // assembled text must equal the original string.
+        assert!(residual.is_empty(), "residual should be empty after all chunks");
+        assert_eq!(assembled, full, "assembled text must equal original CJK string");
     }
 }
