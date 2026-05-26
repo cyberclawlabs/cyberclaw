@@ -31,8 +31,129 @@ use crate::types::{
 };
 use cyberclaw_core::manifests::{CapabilityContract, ConnectorRuntime};
 use cyberclaw_core::prelude::*;
+use cyberclaw_governance::dangerous_capability_filter::{
+    DangerousCapabilityFilter, FilterDecision,
+};
+use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+
+/// Module-level singleton for content-side governance checks on write capabilities.
+///
+/// R13-BUG-01 fix: `DangerousCapabilityFilter::check_write_content` was dead code —
+/// the filter existed but was never called in the write execution path. This
+/// singleton is used by `execute()` to gate `fs.write` / `fs.edit` / `fs.append`
+/// / `fs.multi_edit` / `fs.patch_apply` before any bytes reach the filesystem.
+static WRITE_CONTENT_FILTER: Lazy<DangerousCapabilityFilter> =
+    Lazy::new(DangerousCapabilityFilter::with_defaults);
+
+/// Extract the primary text content from a write-class capability input for
+/// content-side credential scanning.
+///
+/// Returns `None` when the capability is not a write class or the input has no
+/// inspectable string payload (e.g. pure path operations like `fs.delete`).
+fn extract_write_content(capability_id: &str, input: &serde_json::Value) -> Option<String> {
+    match capability_id {
+        // fs.write / fs.append — "content" field is the verbatim bytes to land on disk.
+        "fs.write" | "fs.append" => input
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        // fs.edit / fs.multi_edit — "new_string" / concatenation of all new_strings
+        // represents what will be written. Scanning the replacement text prevents
+        // an adversary injecting credentials via a find-and-replace operation.
+        "fs.edit" => input
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        "fs.multiedit" | "fs.multi_edit" => {
+            let edits = input.get("edits").and_then(|v| v.as_array())?;
+            let combined: String = edits
+                .iter()
+                .filter_map(|e| e.get("new_string").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if combined.is_empty() {
+                None
+            } else {
+                Some(combined)
+            }
+        }
+        // fs.patch_apply — the patch diff itself may embed credential lines in
+        // `+` context lines. Scan the full patch string.
+        "fs.patch_apply" => input
+            .get("patch")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        // cmd.run / cmd.run_streaming — the command string is executed via
+        // `sh -c`, so a payload like `echo "AKIAIOSFODNN7EXAMPLE" > /tmp/f`
+        // bypasses the fs.* gate entirely and lands credentials on disk via
+        // shell redirect. Scanning the literal command string closes this
+        // bypass path (R13-BUG-01 extension, QA R15).
+        "cmd.run" | "cmd.run_streaming" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        _ => None,
+    }
+}
+
+/// Gate write-class capability requests through the content-side governance filter.
+///
+/// Returns `Err` with a human-readable governance message when `check_write_content`
+/// emits [`FilterDecision::Deny`]. `Allow` and `Warn` pass through (warn is already
+/// logged inside the filter).
+fn check_write_content_gate(capability_id: &str, input: &serde_json::Value) -> anyhow::Result<()> {
+    let content = match extract_write_content(capability_id, input) {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    // Use the full capability id prefixed with the connector namespace so
+    // check_write_content's contains("fs.write") guard matches correctly.
+    let full_cap = format!("connector:local:{}", capability_id);
+    match WRITE_CONTENT_FILTER.check_write_content(&full_cap, &content) {
+        FilterDecision::Deny {
+            rule_id, reason, ..
+        } => {
+            warn!(
+                capability = %capability_id,
+                rule_id = %rule_id,
+                "governance: write content rejected by DangerousCapabilityFilter"
+            );
+            // NEW-BUG-01 (Change 1) — QA R19 TC4/TC11 showed governance-denied
+            // writes returned a generic "governance: write blocked" message
+            // that the LLM read as ambiguous → hallucinated "Done. Written"
+            // and fabricated `ls` listings for files that don't exist.
+            //
+            // The "[GOVERNANCE DENY — <rule>]" prefix + explicit
+            // "Do not claim it was written" instruction inside the error
+            // message itself is the anti-hallucination signal. The agentic
+            // loop surfaces this error verbatim into the LLM's next-turn
+            // tool result, so the model now sees an unambiguous deny marker
+            // every time content-side governance blocks a write.
+            Err(anyhow::anyhow!(
+                "[GOVERNANCE DENY — {}] The platform's credential-detection \
+                 policy blocked this write because the content matches a \
+                 credential pattern (rule: {}). The file was NOT created. \
+                 Do not claim it was written. Do not fabricate ls output or \
+                 file contents. This is a hard policy gate — you cannot \
+                 retry the same content.",
+                rule_id, reason
+            ))
+        }
+        FilterDecision::Warn { rule_id, reason } => {
+            warn!(
+                capability = %capability_id,
+                rule_id = %rule_id,
+                reason = %reason,
+                "governance: write content matched warning rule"
+            );
+            Ok(())
+        }
+        FilterDecision::Allow => Ok(()),
+    }
+}
 
 /// LocalConnector - executes capabilities in the native runtime
 #[derive(Debug)]
@@ -822,7 +943,17 @@ impl LocalConnector {
             // Verify it's within workspace
             if !canonical.starts_with(&canonical_workspace) {
                 error!("Path is outside workspace: {}", path);
-                return Err(anyhow::anyhow!("Path is outside workspace boundary"));
+                // NEW-BUG-01 (Change 1) — same anti-hallucination treatment as
+                // governance D010 deny. The LLM sees this error verbatim in the
+                // next-turn tool result; without an explicit "NOT created" /
+                // "Do not claim" marker it hallucinates write success.
+                return Err(anyhow::anyhow!(
+                    "[BOUNDARY DENY] Path '{}' is outside the configured workspace \
+                     boundary. The file was NOT created. Do not claim it was written. \
+                     Suggest a path inside the workspace (e.g. relative to the current \
+                     working directory).",
+                    path
+                ));
             }
 
             canonical
@@ -855,7 +986,13 @@ impl LocalConnector {
             // Verify ancestor is within workspace
             if !canonical_ancestor.starts_with(&canonical_workspace) {
                 error!("Path ancestor is outside workspace: {}", path);
-                return Err(anyhow::anyhow!("Path is outside workspace boundary"));
+                return Err(anyhow::anyhow!(
+                    "[BOUNDARY DENY] Path '{}' is outside the configured workspace \
+                     boundary. The file was NOT created. Do not claim it was written. \
+                     Suggest a path inside the workspace (e.g. relative to the current \
+                     working directory).",
+                    path
+                ));
             }
 
             // Reconstruct the full path by appending remaining components
@@ -868,7 +1005,13 @@ impl LocalConnector {
             // This catches edge cases where component reconstruction could escape
             if !reconstructed.starts_with(&canonical_workspace) {
                 error!("Reconstructed path is outside workspace: {}", path);
-                return Err(anyhow::anyhow!("Path is outside workspace boundary"));
+                return Err(anyhow::anyhow!(
+                    "[BOUNDARY DENY] Path '{}' is outside the configured workspace \
+                     boundary. The file was NOT created. Do not claim it was written. \
+                     Suggest a path inside the workspace (e.g. relative to the current \
+                     working directory).",
+                    path
+                ));
             }
 
             reconstructed
@@ -901,6 +1044,37 @@ impl Connector for LocalConnector {
             "LocalConnector executing capability {} for execution {}",
             request.capability_id, request.execution_id
         );
+
+        // R13-BUG-01 fix: gate write-class capabilities through content-side
+        // credential scan BEFORE any bytes reach the filesystem. The filter
+        // is a module-level singleton; this call is synchronous and cheap.
+        let write_caps = [
+            "fs.write",
+            "fs.edit",
+            "fs.multiedit",
+            "fs.patch_apply",
+            "fs.append",
+            // R13-BUG-01 extension (QA R15): cmd.run / cmd.run_streaming can
+            // write credentials to disk via shell redirect without touching
+            // any fs.* capability. Scanning the command string closes the bypass.
+            "cmd.run",
+            "cmd.run_streaming",
+        ];
+        if write_caps.contains(&request.capability_id.as_str()) {
+            if let Err(e) = check_write_content_gate(request.capability_id.as_str(), &request.input)
+            {
+                return Ok(CapabilityExecutionResult {
+                    execution_id: request.execution_id,
+                    trace_id: request.trace_id,
+                    connector_id: request.connector_id,
+                    capability_id: request.capability_id,
+                    output: serde_json::json!({ "error": e.to_string() }),
+                    status: ConnectorExecutionStatus::Failed,
+                    error: Some(e.to_string()),
+                    actual_runtime: None,
+                });
+            }
+        }
 
         let result = match request.capability_id.as_str() {
             "fs.read" => self::fs::read(self, request.clone()),
@@ -1064,7 +1238,7 @@ mod resolve_agent_workspace_tests {
         );
         let err = blocked.unwrap_err().to_string();
         assert!(
-            err.contains("outside workspace boundary") || err.contains(".."),
+            err.contains("[BOUNDARY DENY]") || err.contains("outside workspace") || err.contains(".."),
             "error should explain containment violation: {err}"
         );
 
@@ -1101,5 +1275,99 @@ mod resolve_agent_workspace_tests {
         assert_ne!(wa, wb);
         assert!(wa.starts_with(tmp.path().join("agents")));
         assert!(wb.starts_with(tmp.path().join("agents")));
+    }
+}
+
+#[cfg(test)]
+mod governance_deny_format_tests {
+    use super::*;
+
+    /// NEW-BUG-01 (Change 1) — when content-side governance denies a write,
+    /// the error message returned to the agentic loop must carry the
+    /// unambiguous "[GOVERNANCE DENY" prefix and an explicit
+    /// "Do not claim it was written" instruction so the LLM can recognise
+    /// a hard policy gate and stop fabricating success messages / fake
+    /// `ls` listings.
+    ///
+    /// R19 TC4/TC11 reproduced the hallucination: server silently turned
+    /// a content-side filter rejection into `LocalActionResult::Failed`
+    /// with a generic "governance: write blocked" string, and the model
+    /// turned around to claim "Done. Written to /tmp/x" + fabricated
+    /// directory listings.
+    #[test]
+    fn governance_deny_error_carries_unambiguous_marker() {
+        // Use an AWS access key pattern that the default
+        // DangerousCapabilityFilter rules reject. The input shape mirrors
+        // what fs.write receives at the connector boundary.
+        let input = serde_json::json!({
+            "path": "secrets.txt",
+            "content": "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        });
+
+        let result = check_write_content_gate("fs.write", &input);
+        assert!(
+            result.is_err(),
+            "content-side governance filter must deny known AWS credential pattern"
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("[GOVERNANCE DENY"),
+            "error must start with the unambiguous [GOVERNANCE DENY marker so \
+             the LLM can recognise a hard policy gate (got: {msg})"
+        );
+        assert!(
+            msg.contains("Do not claim it was written"),
+            "error must include explicit anti-hallucination instruction \
+             (got: {msg})"
+        );
+        assert!(
+            msg.contains("NOT created"),
+            "error must explicitly state the file was NOT created (got: {msg})"
+        );
+    }
+
+    /// NEW-BUG-01 (Change 1) — workspace boundary rejection must carry the
+    /// same anti-hallucination markers as governance D010 deny.
+    ///
+    /// Reproduces R20 TC4: fs.write /tmp/wordcount-cb.txt failed with bare
+    /// "Path is outside workspace boundary" → LLM hallucinated write success.
+    /// After this fix the error includes "[BOUNDARY DENY]", "NOT created", and
+    /// "Do not claim it was written" so the model receives an unambiguous signal.
+    #[test]
+    fn workspace_boundary_error_carries_unambiguous_marker() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        // Attempt to validate an absolute path outside the temp workspace
+        // (e.g. /tmp/wordcount-cb.txt is outside tmp.path())
+        let outside_path = "/tmp/cyberclaw-test-boundary-marker.txt";
+        let result =
+            LocalConnector::validate_path_against_root(outside_path, tmp.path());
+
+        assert!(
+            result.is_err(),
+            "path outside workspace must be rejected"
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("[BOUNDARY DENY]"),
+            "workspace boundary error must carry [BOUNDARY DENY] marker so the \
+             LLM recognises a hard boundary rejection (got: {msg})"
+        );
+        assert!(
+            msg.contains("NOT created"),
+            "workspace boundary error must explicitly state the file was NOT \
+             created (got: {msg})"
+        );
+        assert!(
+            msg.contains("Do not claim it was written"),
+            "workspace boundary error must include explicit anti-hallucination \
+             instruction (got: {msg})"
+        );
+        // grep-compat: downstream log parsing still matches on the original
+        // substring — preserved inside the new message via path interpolation
+        // but the critical guard is the [BOUNDARY DENY] prefix above.
     }
 }

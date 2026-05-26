@@ -19,10 +19,11 @@ members = [
   "crates/cyberclaw-llm-bridge",
   "crates/cyberclaw-consensus",
   "crates/cyberclaw-memory-extraction",
+  "crates/cyberclaw-wire",
 ]
 
 [workspace.package]
-version = "1.2.19"
+version = "1.3.0"
 edition = "2021"
 authors = ["CyberClaw Labs <info@cyberclawlabs.ai>"]
 license = "Apache-2.0"
@@ -74,3 +75,4 @@ cyberclaw-plugin-runtime = { path = "crates/cyberclaw-plugin-runtime" }
 cyberclaw-llm = { path = "crates/cyberclaw-llm" }
 cyberclaw-llm-bridge = { path = "crates/cyberclaw-llm-bridge" }
 cyberclaw-consensus = { path = "crates/cyberclaw-consensus" }
+cyberclaw-wire = { path = "crates/cyberclaw-wire" }

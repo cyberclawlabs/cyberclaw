@@ -43,6 +43,7 @@
 use crate::capability::{CapabilityEffect, CapabilityRef, RiskLevel};
 use crate::ids::{CapabilityId, ConnectorId};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 // ============================================================================
 // ToolsetCategory
@@ -189,6 +190,21 @@ pub struct CapabilityFacade {
     /// snapshots decodable.
     #[serde(default)]
     pub exposure: FacadeExposure,
+
+    /// v1.3 WP-4 Change 2 (2026-05-23) — structured workspace boundary the
+    /// agent is allowed to read/write under. When present this replaces the
+    /// ad-hoc system-prompt string concatenation (`chat_handler.rs` BUG-CB-19
+    /// fix) that used to splice a workspace-root sentence into every prompt.
+    /// Now the agent sees the boundary as structured metadata attached to the
+    /// tool, which means the LLM cannot accidentally rewrite or summarise it
+    /// away, and tools that don't need a workspace (memory, web_fetch, …)
+    /// simply leave the field None.
+    ///
+    /// `#[serde(default)]` + `Option` keep the field additive: older facade
+    /// snapshots without `workspace_root` decode cleanly, and the JSON wire
+    /// format omits the key entirely when the value is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<PathBuf>,
 }
 
 fn default_connector_id() -> ConnectorId {
@@ -243,6 +259,7 @@ impl CapabilityFacade {
             destructive,
             input_schema: None,
             exposure: FacadeExposure::default(),
+            workspace_root: None,
         }
     }
 
@@ -251,6 +268,16 @@ impl CapabilityFacade {
     /// the standard LLM palette without dropping it from the registry.
     pub fn with_exposure(mut self, exposure: FacadeExposure) -> Self {
         self.exposure = exposure;
+        self
+    }
+
+    /// v1.3 WP-4 Change 2 — builder helper to attach a workspace root to a
+    /// facade. The host binary (`cyberclaw-server`) calls this when building
+    /// the tool palette so file-system-touching tools (`file_read`,
+    /// `file_write`, `bash`, …) see the agent's allowed root as structured
+    /// metadata instead of a system-prompt sentence appended after the fact.
+    pub fn with_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+        self.workspace_root = Some(workspace_root);
         self
     }
 

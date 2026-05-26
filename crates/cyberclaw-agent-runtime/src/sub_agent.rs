@@ -346,6 +346,7 @@ impl SubAgentOrchestrator {
             model,
             budget: child_budget,
             stuck_threshold: 3,
+            per_tool_max_calls: 4,
             // Sub-agents inherit no tool palette by default — the orchestrator
             // explicitly delegates capabilities via gateway scoping. If a
             // sub-agent needs tools, set them here from the parent context.
@@ -387,6 +388,9 @@ impl SubAgentOrchestrator {
                 }
                 Ok(IterationResult::Stuck(reason)) => {
                     break Err(format!("stuck: {reason}"));
+                }
+                Ok(IterationResult::ToolLimitReached(reason)) => {
+                    break Err(format!("tool limit reached: {reason}"));
                 }
                 Ok(IterationResult::ToolCalls(calls)) => {
                     // Dispatch each tool call through the gateway and feed results back.

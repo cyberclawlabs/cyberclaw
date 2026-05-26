@@ -1,0 +1,11 @@
+[package]
+name = "cyberclaw-wire"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Typed SSE wire protocol for CyberClaw server↔CLI streaming (v1.3 WP-3)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

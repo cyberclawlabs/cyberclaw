@@ -32,13 +32,15 @@
 //! - Does NOT patch F-class prompts. The verifier chain is a post-hoc
 //!   gate, run after the agent says it is done.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, warn};
+
+use crate::agentic_loop::{ToolOutcomeEntry, ToolStatus};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -703,6 +705,259 @@ impl OutputVerifier for RegexAssertVerifier {
 }
 
 // ---------------------------------------------------------------------------
+// ToolFactVerifier — Phase 2 of LLM output reliability architecture
+// (docs/implementation/release/llm-output-reliability-architecture-2026-05-25.md)
+// ---------------------------------------------------------------------------
+
+/// Affirmative-claim verbs that would falsely declare success for a tool
+/// call that actually returned `Denied` or `Error`.
+///
+/// Conservative list — precision > recall (per design open-question 1).
+const SUCCESS_VERBS: &[&str] = &[
+    "written to",
+    "created",
+    "saved to",
+    "wrote to",
+    "successfully written",
+    "file was written",
+    "done. written",
+    "output:",
+    "returned:",
+    "result was",
+    "fetched from",
+    "downloaded to",
+    "file at",
+];
+
+/// Disclaimer keywords. When any of these co-occur with a target reference
+/// the verifier treats the response as an honest failure acknowledgement
+/// and does NOT trigger a retry — even if a success verb also appears.
+const NEGATIVE_DISCLAIMERS: &[&str] = &[
+    "denied",
+    "blocked",
+    "failed",
+    "error",
+    "not created",
+    "cannot",
+    "couldn't",
+    "rejected",
+    "boundary",
+];
+
+/// Extract `(verb, path)` pairs from a response string where a SUCCESS_VERB
+/// appears in close proximity (within ~80 chars) before an absolute or
+/// relative path.
+///
+/// Conservative design: false-negative (miss) is preferred over
+/// false-positive (reject a legitimate response). We only match when:
+/// - The path starts with `/` or `./` (absolute or relative-explicit)
+/// - The nearest preceding SUCCESS_VERB is within 80 characters
+/// - The response does not contain any NEGATIVE_DISCLAIMERS near the path
+///   (checked on the full lowercased response — same as Phase 1)
+fn extract_path_claims(response: &str) -> Vec<(String, String)> {
+    // Regex: captures paths starting with / or ./ followed by word chars,
+    // dots, dashes, underscores. Backtick-quoted paths are also matched.
+    let path_re = match Regex::new(r"`?(\.?/[\w./\-_]+)`?") {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let response_lower = response.to_lowercase();
+
+    // Build a list of (byte_offset, verb) for all SUCCESS_VERB occurrences.
+    let mut verb_offsets: Vec<(usize, &str)> = Vec::new();
+    for verb in SUCCESS_VERBS {
+        let mut search_from = 0usize;
+        while let Some(pos) = response_lower[search_from..].find(verb) {
+            let abs_pos = search_from + pos;
+            verb_offsets.push((abs_pos, verb));
+            search_from = abs_pos + 1;
+        }
+    }
+
+    if verb_offsets.is_empty() {
+        return Vec::new();
+    }
+
+    // Skip entire extraction when any NEGATIVE_DISCLAIMERS appear — this
+    // keeps the check conservative: if the agent honestly acknowledged a
+    // failure anywhere in the response, we do not penalise it.
+    let has_disclaimer = NEGATIVE_DISCLAIMERS
+        .iter()
+        .any(|d| response_lower.contains(d));
+    if has_disclaimer {
+        return Vec::new();
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new();
+
+    for cap in path_re.captures_iter(response) {
+        let path_match = match cap.get(1) {
+            Some(m) => m,
+            None => continue,
+        };
+        let path = path_match.as_str();
+        let path_start = path_match.start();
+
+        // Find the nearest SUCCESS_VERB that precedes this path within 80 chars.
+        let nearest_verb = verb_offsets.iter().filter_map(|(offset, verb)| {
+            if *offset < path_start {
+                let gap = path_start - offset;
+                if gap <= 80 {
+                    Some((gap, *verb))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).min_by_key(|(gap, _)| *gap);
+
+        if let Some((_, verb)) = nearest_verb {
+            results.push((verb.to_string(), path.to_string()));
+        }
+    }
+
+    results
+}
+
+/// Verifier that cross-references the final assistant response against
+/// the [`ToolOutcomeLedger`](crate::agentic_loop::ToolOutcomeEntry).
+///
+/// Fires `RejectAndRetry` when the response claims success for a tool
+/// call that actually returned `Denied` or `Error`. Uses conservative
+/// pattern matching:
+///
+/// 1. Iterate non-`Ok` ledger entries that carry a `target_resource`.
+/// 2. Lowercase response must contain the target string.
+/// 3. AND response must contain at least one [`SUCCESS_VERBS`] phrase.
+/// 4. AND response must NOT contain any [`NEGATIVE_DISCLAIMERS`] term.
+///
+/// **Phase 2 (NEW-BUG-01)**: After the denied/error check, also detects
+/// hallucinated file operations — where the response claims an action on a
+/// path that has *no entry at all* in the ledger. Controlled by
+/// [`extract_path_claims`] which is deliberately conservative.
+///
+/// Reuses the existing `verifier_retry_used` 1-cap in `DefaultAgenticLoop`
+/// (no new retry budget) per design.
+pub struct ToolFactVerifier {
+    ledger: Arc<Mutex<Vec<ToolOutcomeEntry>>>,
+}
+
+impl ToolFactVerifier {
+    /// Construct a verifier that reads from `ledger`. The verifier holds
+    /// a cheap `Arc` clone of the handle — callers can keep using the
+    /// original handle (typically `DefaultAgenticLoop::tool_outcome_ledger_arc()`).
+    pub fn new(ledger: Arc<Mutex<Vec<ToolOutcomeEntry>>>) -> Self {
+        Self { ledger }
+    }
+}
+
+#[async_trait]
+impl OutputVerifier for ToolFactVerifier {
+    async fn verify(
+        &self,
+        _prompt: &str,
+        response: &str,
+        _ctx: &VerifyCtx,
+    ) -> VerificationDirective {
+        let entries = match self.ledger.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let response_lower = response.to_lowercase();
+
+        for entry in entries.iter() {
+            if entry.status == ToolStatus::Ok {
+                continue;
+            }
+            let Some(target) = entry.target_resource.as_deref() else {
+                continue;
+            };
+            if target.is_empty() {
+                continue;
+            }
+
+            let target_lower = target.to_lowercase();
+            if !response_lower.contains(&target_lower) {
+                continue;
+            }
+
+            let has_success_claim = SUCCESS_VERBS.iter().any(|v| response_lower.contains(v));
+            let has_disclaimer = NEGATIVE_DISCLAIMERS
+                .iter()
+                .any(|d| response_lower.contains(d));
+
+            if has_success_claim && !has_disclaimer {
+                let marker_suffix = entry
+                    .error_marker
+                    .as_deref()
+                    .map(|m| format!(" ({})", m))
+                    .unwrap_or_default();
+
+                // Phase 4 telemetry — single structured warn per fire so
+                // operators can monitor rate via log aggregation.
+                tracing::warn!(
+                    target = %target,
+                    tool = %entry.tool_name,
+                    status = ?entry.status,
+                    "ToolFactVerifier rejected response — false success claim detected"
+                );
+
+                let feedback = format!(
+                    "Your response claims success for `{}` but the tool call \
+                     actually returned {:?}{}. Correct your response to accurately \
+                     reflect the failure — do not claim success.",
+                    target, entry.status, marker_suffix
+                );
+                return VerificationDirective::RejectAndRetry(feedback);
+            }
+        }
+
+        // Phase 2: claim-without-ledger check (NEW-BUG-01).
+        // Detect hallucinated file operations: response claims an action on a
+        // path that never appeared in the ledger at all.
+        let known_paths: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|e| e.target_resource.clone())
+            .collect();
+
+        // Drop the lock before the (cheap) string work below.
+        drop(entries);
+
+        let path_claims = extract_path_claims(response);
+        for (verb, path) in path_claims {
+            if known_paths.contains(&path) {
+                continue;
+            }
+
+            // Path not in ledger AND response claims an action verb on it →
+            // likely hallucinated tool call.
+            tracing::warn!(
+                path = %path,
+                verb = %verb,
+                "ToolFactVerifier rejected response — claimed path not in ledger (NEW-BUG-01)"
+            );
+
+            return VerificationDirective::RejectAndRetry(format!(
+                "Your response claims `{}` for path `{}`, but no tool call was \
+                 made for that path. You cannot claim file operations succeeded \
+                 when no tool was invoked. Either call the correct tool or remove \
+                 the false claim.",
+                verb, path
+            ));
+        }
+
+        VerificationDirective::Accept
+    }
+
+    fn name(&self) -> &'static str {
+        "tool_fact"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1093,5 +1348,155 @@ print(2+2)
             .with_expected_json_keys(["role".to_string()]);
         let out = chain.run("p", resp, &ctx).await;
         assert_eq!(out, VerificationDirective::Accept);
+    }
+
+    // ----------------------------- ToolFactVerifier ----------------------
+    // Phase 4 of LLM output reliability architecture
+    // (docs/implementation/release/llm-output-reliability-architecture-2026-05-25.md)
+
+    fn ledger_with(entries: Vec<ToolOutcomeEntry>) -> Arc<Mutex<Vec<ToolOutcomeEntry>>> {
+        Arc::new(Mutex::new(entries))
+    }
+
+    fn denied_entry(target: &str) -> ToolOutcomeEntry {
+        ToolOutcomeEntry {
+            tool_name: "fs.write".to_string(),
+            capability_id: "fs.write".to_string(),
+            status: ToolStatus::Denied,
+            error_marker: Some("[BOUNDARY DENY]".to_string()),
+            target_resource: Some(target.to_string()),
+        }
+    }
+
+    fn ok_entry(target: &str) -> ToolOutcomeEntry {
+        ToolOutcomeEntry {
+            tool_name: "fs.write".to_string(),
+            capability_id: "fs.write".to_string(),
+            status: ToolStatus::Ok,
+            error_marker: None,
+            target_resource: Some(target.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_fact_verifier_rejects_false_success_claim() {
+        let ledger = ledger_with(vec![denied_entry("/tmp/foo.txt")]);
+        let v = ToolFactVerifier::new(ledger);
+        let response = "Done. Written to /tmp/foo.txt";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        match out {
+            VerificationDirective::RejectAndRetry(msg) => {
+                assert!(msg.contains("/tmp/foo.txt"));
+                assert!(msg.contains("do not claim success"));
+            }
+            other => panic!("expected RejectAndRetry, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_fact_verifier_accepts_honest_failure_acknowledgment() {
+        let ledger = ledger_with(vec![denied_entry("/tmp/foo.txt")]);
+        let v = ToolFactVerifier::new(ledger);
+        // Response references the target path AND uses a disclaimer
+        // keyword ("blocked"), so the verifier accepts it as honest.
+        let response = "The write to /tmp/foo.txt was blocked by governance policy.";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        assert_eq!(out, VerificationDirective::Accept);
+    }
+
+    #[tokio::test]
+    async fn test_tool_fact_verifier_accepts_when_ledger_empty() {
+        // Empty ledger + response that contains ONLY prose (no success verb
+        // adjacent to a path) must still Accept.  The "Done. Written to …"
+        // case now correctly triggers Phase 2; use a neutral response here to
+        // isolate the Phase-1 "empty ledger" invariant.
+        let ledger = ledger_with(vec![]);
+        let v = ToolFactVerifier::new(ledger);
+        let response = "No files were changed.";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        assert_eq!(out, VerificationDirective::Accept);
+    }
+
+    #[tokio::test]
+    async fn test_tool_fact_verifier_accepts_when_target_not_in_response() {
+        // Phase 1: denied entry for /tmp/foo.txt but response never mentions
+        // that path → Phase 1 does not fire.
+        // Phase 2: response mentions /tmp/bar.txt with a success verb, but
+        // /tmp/bar.txt is also not in the ledger → Phase 2 fires.
+        // Update: after NEW-BUG-01, the verifier correctly rejects this
+        // hallucinated write.  Use a genuinely neutral response to test the
+        // "denied target absent from response" invariant in isolation.
+        let ledger = ledger_with(vec![denied_entry("/tmp/foo.txt")]);
+        let v = ToolFactVerifier::new(ledger);
+        // Response talks about a completely different topic — no paths, no
+        // success verbs — so neither Phase 1 nor Phase 2 should trigger.
+        let response = "The operation could not be completed.";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        assert_eq!(out, VerificationDirective::Accept);
+    }
+
+    #[tokio::test]
+    async fn test_tool_fact_verifier_ok_status_ignored() {
+        // Ledger only has an Ok entry — even if the response makes the
+        // exact same success claim, the verifier must accept (no false
+        // trigger on a real success).
+        let ledger = ledger_with(vec![ok_entry("/tmp/foo.txt")]);
+        let v = ToolFactVerifier::new(ledger);
+        let response = "Done. Written to /tmp/foo.txt";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        assert_eq!(out, VerificationDirective::Accept);
+    }
+
+    // ---- Phase 2: ledger-empty-claim tests (NEW-BUG-01) ----
+
+    #[tokio::test]
+    async fn test_verifier_rejects_path_claim_not_in_ledger() {
+        // Empty ledger — agent never called any tool — but response claims
+        // "written to /tmp/foo.txt". Verifier must reject.
+        let ledger = ledger_with(vec![]);
+        let v = ToolFactVerifier::new(ledger);
+        let response = "Done. Written to /tmp/foo.txt";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        match out {
+            VerificationDirective::RejectAndRetry(msg) => {
+                assert!(msg.contains("/tmp/foo.txt"), "feedback should name the path");
+                assert!(
+                    msg.contains("no tool was invoked"),
+                    "feedback should explain the missing tool call"
+                );
+            }
+            other => panic!("expected RejectAndRetry, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verifier_accepts_path_claim_with_ledger_ok() {
+        // Ledger has an Ok entry for /tmp/foo.txt — this was a real write.
+        // Verifier must accept even though the response uses a success verb.
+        let ledger = ledger_with(vec![ok_entry("/tmp/foo.txt")]);
+        let v = ToolFactVerifier::new(ledger);
+        let response = "Done. Written to /tmp/foo.txt";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        assert_eq!(
+            out,
+            VerificationDirective::Accept,
+            "ledger has Ok entry — should accept"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verifier_no_false_positive_on_path_echo() {
+        // Response only mentions /etc/foo in a hypothetical / echo context
+        // with no success verb adjacent to it — verifier must not reject.
+        let ledger = ledger_with(vec![]);
+        let v = ToolFactVerifier::new(ledger);
+        // No SUCCESS_VERB near /etc/foo — pure descriptive text.
+        let response = "You asked about /etc/foo but I have not touched it.";
+        let out = v.verify("prompt", response, &VerifyCtx::new()).await;
+        assert_eq!(
+            out,
+            VerificationDirective::Accept,
+            "no success verb near path — should not trigger"
+        );
     }
 }

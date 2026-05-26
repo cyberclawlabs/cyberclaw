@@ -259,6 +259,7 @@ mod tests {
             read_only: true,
             destructive: false,
             exposure: cyberclaw_core::facade::FacadeExposure::LlmDefault,
+            workspace_root: None,
         }
     }
 

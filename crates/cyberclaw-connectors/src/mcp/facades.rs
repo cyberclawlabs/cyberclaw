@@ -33,6 +33,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["server", "tool"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::Mcp,
         ),

@@ -86,6 +86,11 @@ const COLOR_ERR: Color = Color::Red;
 
 const DEFAULT_PROMPT_USER: &str = "cyberclaw";
 
+/// 按字符数截断字符串，避免 byte-slice 在 unicode 边界 panic。
+fn truncate_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 /// 把 logo 行编为带渐变色的 Line 序列。
 fn logo_lines() -> Vec<Line<'static>> {
     let palette = [COLOR_PRIMARY, COLOR_ACCENT, COLOR_BORDER];
@@ -190,6 +195,31 @@ pub enum TokenEvent {
     /// SSE 推送的审批请求（构造侧由服务端 SSE stream 触发，客户端 match arm 已就绪）
     #[allow(dead_code)]
     ApprovalRequest(ApprovalCtx),
+    /// v1.3 WP-1: 服务端分配的 conversation_id（新建会话时由响应头携带）。
+    ConvId(String),
+    /// v1.3 WP-3: tool dispatch began (TUI renders an inline spinner marker).
+    ToolStart {
+        tool: String,
+        #[allow(dead_code)] // surfaced via wire; future renderer may show args
+        args: serde_json::Value,
+    },
+    /// v1.3 WP-3: tool dispatch completed (TUI replaces the spinner line).
+    ToolComplete {
+        tool: String,
+        ok: bool,
+        preview: String,
+        duration_ms: u64,
+    },
+    /// v1.3 WP-3: governance approval was granted.
+    ApprovalGranted { tool: String },
+    /// v1.3 WP-3: governance approval was denied.
+    ApprovalDenied {
+        tool: String,
+        reason: Option<String>,
+    },
+    /// v1.3 WP-3: application-level keep-alive — Step 6 updates a status-bar
+    /// `♥ Ns` indicator so users see "still alive" during slow LLM calls.
+    Heartbeat { elapsed_secs: u64 },
 }
 
 /// 审批请求上下文
@@ -310,6 +340,9 @@ struct TuiApp<'a> {
     last_rate_limit: Option<RateLimitInfo>,
     /// Session-level cost accumulator fed by server `usage` SSE frames.
     cost_accumulator: cyberclaw_llm::CostAccumulator,
+    /// v1.3 WP-3 Step 6: seconds since the most recent server Heartbeat frame.
+    /// `None` until the first heartbeat arrives or after a stream completes.
+    last_heartbeat_secs: Option<u64>,
 }
 
 impl<'a> TuiApp<'a> {
@@ -348,6 +381,7 @@ impl<'a> TuiApp<'a> {
             show_tool_details: true,
             last_rate_limit: None,
             cost_accumulator: cyberclaw_llm::CostAccumulator::default(),
+            last_heartbeat_secs: None,
         }
     }
 
@@ -457,6 +491,9 @@ impl<'a> TuiApp<'a> {
     fn finish_streaming(&mut self) {
         self.streaming = false;
         self.stream_start_tick = None;
+        // v1.3 WP-3 Step 6: clear stale heartbeat info so the next stream
+        // starts with a fresh "alive" indicator.
+        self.last_heartbeat_secs = None;
         if let Some(block) = self.history.last_mut() {
             block.streaming = false;
             // BUG-CB-14: assistant 时间戳之前 = user 提交时刻（placeholder
@@ -492,11 +529,7 @@ impl<'a> TuiApp<'a> {
     /// 推送 CYBERCLAW banner 块（启动时一次）。role="banner" 触发渐变色渲染。
     fn push_banner(&mut self, agent_id: Option<&str>) {
         let agent_display = agent_id.unwrap_or("default");
-        let conv_short = if self.conv_id.len() > 16 {
-            &self.conv_id[..16]
-        } else {
-            &self.conv_id
-        };
+        let conv_short = truncate_chars(&self.conv_id, 16);
         let info = format!(
             "\n  受控智能体平台  ·  Controlled Agent Platform  ·  v{}\n\n\
              \x20 conv:   {}\n\
@@ -807,8 +840,11 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
             .split(size);
 
         // --- Banner 区（BUG-CB-11）---
-        let conv_short_banner = if app.conv_id.len() > 8 {
-            format!("{}…", &app.conv_id[..8])
+        // BUG-R11-NEW-01: 用 chars().take 而非 byte slice，避免 conv_id 含 unicode
+        // (如初值 "pending…" 含 3-byte U+2026) 时 byte-boundary panic。
+        let conv_short_banner = if app.conv_id.chars().count() > 8 {
+            let truncated: String = app.conv_id.chars().take(8).collect();
+            format!("{}…", truncated)
         } else {
             app.conv_id.clone()
         };
@@ -991,11 +1027,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
         f.render_widget(paragraph, chunks[1]);
 
         // --- 状态条 ---
-        let conv_short = if app.conv_id.len() > 8 {
-            &app.conv_id[..8]
-        } else {
-            &app.conv_id
-        };
+        let conv_short = truncate_chars(&app.conv_id, 8);
         let streaming_indicator = if app.streaming { " ●" } else { "" };
         let md_indicator = if app.render_mode == RenderMode::Markdown {
             " │ md"
@@ -1007,6 +1039,11 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
         } else {
             ""
         };
+        // v1.3 WP-3 Step 6: alive indicator from server Heartbeat frames.
+        let heartbeat_indicator = match app.last_heartbeat_secs {
+            Some(secs) if app.streaming => format!(" │ \u{2665} {}s", secs),
+            _ => String::new(),
+        };
         let status_text = if let Some(ref msg) = app.status_msg {
             msg.clone()
         } else {
@@ -1015,7 +1052,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                 None => String::new(),
             };
             format!(
-                " model: {} │ conv: {} │ ~{}tok{}{}{}{}",
+                " model: {} │ conv: {} │ ~{}tok{}{}{}{}{}",
                 app.model,
                 conv_short,
                 app.token_estimate,
@@ -1023,6 +1060,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                 streaming_indicator,
                 md_indicator,
                 trace_indicator,
+                heartbeat_indicator,
             )
         };
         let status_bar = Paragraph::new(status_text)
@@ -1030,11 +1068,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
         f.render_widget(status_bar, chunks[2]);
 
         // --- 输入区（终端风格：外框 + 内部 prompt 行 + textarea） ---
-        let conv_short_for_prompt = if app.conv_id.len() > 12 {
-            &app.conv_id[..12]
-        } else {
-            &app.conv_id
-        };
+        let conv_short_for_prompt = truncate_chars(&app.conv_id, 12);
         let input_outer = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_BORDER))
@@ -1104,7 +1138,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
         // 多行时 prompt 占一行 + textarea 占下面所有行（垂直 split）
         let prompt_line_data = build_prompt_line(
             DEFAULT_PROMPT_USER,
-            conv_short_for_prompt,
+            &conv_short_for_prompt,
             &app.model,
             app.streaming,
             app.pulse_tick,
@@ -1233,7 +1267,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut TuiApp) -> 
                     .map(|(i, s)| {
                         let title = s.title.clone().unwrap_or_else(|| s.id.clone());
                         let date = s.created_at.clone().unwrap_or_default();
-                        let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                        let short_id = truncate_chars(&s.id, 8);
                         let style = if i == ctx.selected {
                             Style::default()
                                 .fg(Color::Black)
@@ -1500,17 +1534,23 @@ async fn post_approval_decision(
 // ---------------------------------------------------------------------------
 
 /// 进入全屏 ratatui TUI，运行 chat REPL。
+///
+/// `conv_id` 为 `None` 时表示新建会话——第一条消息由 v2 endpoint 自动创建，
+/// UUID 从 `X-Conversation-Id` 响应头读取后存入 `current_conv_id`。
 pub async fn run_tui(
     client: Client,
     server: String,
     token: String,
-    conv_id: String,
+    conv_id: Option<String>,
     agent_id: Option<String>,
     model: String,
 ) -> Result<()> {
     let (_guard, mut terminal) = RawModeGuard::enter()?;
 
-    let mut app = TuiApp::new(model.clone(), conv_id.clone());
+    // BUG-R10-01: conv_id 可能为 None（新建会话由 v2 自动分配 UUID）。
+    // TuiApp 显示用 "pending…" 占位，UUID 到达后由 TokenEvent::ConvId 更新。
+    let display_conv_id = conv_id.clone().unwrap_or_else(|| "pending…".to_string());
+    let mut app = TuiApp::new(model.clone(), display_conv_id);
     app.push_banner(agent_id.as_deref());
 
     let (tx, mut rx) = mpsc::channel::<TokenEvent>(256);
@@ -1518,7 +1558,9 @@ pub async fn run_tui(
     let mut current_model = model;
     let mut first_message = true;
     let mut current_agent_id: Option<String> = agent_id.clone();
-    let mut messages: Vec<super::chat::ChatMessage> = Vec::new();
+    // v1.3 WP-1: 历史由服务端持有，TUI 只需跟踪当前 conv_id（可被服务端更新）。
+    // BUG-R10-01: 初始值为传入的 conv_id（可为 None，表示新建）。
+    let mut current_conv_id: Option<String> = conv_id.clone();
     // track whether we should exit
     let mut should_quit = false;
 
@@ -1566,8 +1608,16 @@ pub async fn run_tui(
                     } else {
                         // --- Normal key handling ---
                         match (key.modifiers, key.code) {
-                            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+                            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                                 break;
+                            }
+                            (_, KeyCode::Esc) => {
+                                // Esc 不再退出 TUI（之前误触退出 = UX bug）。
+                                // 改为清当前输入框。退出请按 Ctrl-C。
+                                let _ = app.take_input();
+                                app.status_msg = Some(
+                                    "输入已清空 · 退出请按 Ctrl-C".to_string(),
+                                );
                             }
                             (KeyModifiers::CONTROL, KeyCode::Char('s'))
                             | (KeyModifiers::NONE, KeyCode::Enter) => {
@@ -1582,7 +1632,7 @@ pub async fn run_tui(
                                         &client,
                                         &server,
                                         &token,
-                                        &conv_id,
+                                        current_conv_id.as_deref().unwrap_or(""),
                                         &mut current_model,
                                         &mut current_agent_id,
                                         &mut app,
@@ -1678,21 +1728,24 @@ pub async fn run_tui(
                     app.append_token(&tok);
                 }
                 Ok(TokenEvent::Done) => {
-                    if let Some(block) = app.history.last() {
-                        if block.role == "assistant" {
-                            let content = block.content.clone();
-                            if !content.is_empty() {
-                                messages.push(super::chat::ChatMessage {
-                                    role: "assistant".to_string(),
-                                    content,
-                                });
-                            }
-                        }
-                    }
+                    // v1.3 WP-1: 历史由服务端持有，不在客户端积累消息列表。
                     app.finish_streaming();
+                }
+                Ok(TokenEvent::ConvId(id)) => {
+                    // 服务端分配了新的（或确认了已有的）conversation id。
+                    // BUG-R10-01: 同步更新 app.conv_id 使 banner/header 显示真实 UUID。
+                    current_conv_id = Some(id.clone());
+                    app.conv_id = id.clone();
+                    save_last_conv_id(&id);
                 }
                 Ok(TokenEvent::Error(e)) => {
                     app.finish_streaming();
+                    // v1.3 WP-1: 会话超时
+                    if e == "SESSION_EXPIRED" {
+                        current_conv_id = None;
+                        app.push_system("[Session expired] 会话已超时，下次消息将新建会话。".to_string());
+                        continue;
+                    }
                     // BUG-CB-08: detect auth-class errors and append a helpful
                     // hint so users know to refresh their token.
                     let lower = e.to_lowercase();
@@ -1753,6 +1806,38 @@ pub async fn run_tui(
                     };
                     app.cost_accumulator.add_response(&u.model, &usage);
                 }
+                // v1.3 WP-3 Step 5: render tool lifecycle inline in the
+                // assistant transcript. ToolStart shows a `[tool: x …]`
+                // marker; ToolComplete replaces it with `[tool: x ✓ Nms]`
+                // (success) or `[tool: x ✗ Nms] — <preview>` (failure).
+                Ok(TokenEvent::ToolStart { tool, args: _ }) => {
+                    app.push_system(format!("[tool: {tool} \u{2026}]"));
+                }
+                Ok(TokenEvent::ToolComplete { tool, ok, preview, duration_ms }) => {
+                    let line = if ok {
+                        format!("[tool: {tool} \u{2713} {duration_ms}ms]")
+                    } else {
+                        let trimmed: String = preview.chars().take(80).collect();
+                        format!("[tool: {tool} \u{2717} {duration_ms}ms] — {trimmed}")
+                    };
+                    app.push_system(line);
+                }
+                Ok(TokenEvent::ApprovalGranted { tool }) => {
+                    app.push_system(format!("[\u{2713} approved: {tool}]"));
+                }
+                Ok(TokenEvent::ApprovalDenied { tool, reason }) => {
+                    let line = match reason {
+                        Some(r) => format!("[\u{2717} denied: {tool}] — {r}"),
+                        None => format!("[\u{2717} denied: {tool}]"),
+                    };
+                    app.push_system(line);
+                }
+                // v1.3 WP-3 Step 6: record the heartbeat timestamp so the
+                // status bar can show "♥ Ns" (alive proof) without polluting
+                // the transcript.
+                Ok(TokenEvent::Heartbeat { elapsed_secs }) => {
+                    app.last_heartbeat_secs = Some(elapsed_secs);
+                }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => break,
             }
@@ -1772,46 +1857,48 @@ pub async fn run_tui(
         if let Some(text) = pending_send.take() {
             if first_message {
                 first_message = false;
-                let title: String = text.chars().take(40).collect();
-                let patch_url = format!("{}/api/v1/chat/conversations/{}", server, conv_id);
-                let _ = client
-                    .patch(&patch_url)
-                    .bearer_auth(&token)
-                    .json(&serde_json::json!({ "title": title }))
-                    .send()
-                    .await;
+                // BUG-R10-01: conv_id 可能为 None（新建会话），此时跳过 PATCH title；
+                // 等 v2 响应头返回 UUID 后，后续消息可以再 PATCH（或由服务端自动命名）。
+                if let Some(ref cid) = current_conv_id {
+                    let title: String = text.chars().take(40).collect();
+                    let patch_url = format!("{}/api/v1/chat/conversations/{}", server, cid);
+                    let _ = client
+                        .patch(&patch_url)
+                        .bearer_auth(&token)
+                        .json(&serde_json::json!({ "title": title }))
+                        .send()
+                        .await;
+                }
             }
             app.push_user(text.clone());
             app.push_input_history(&text);
-            messages.push(super::chat::ChatMessage {
-                role: "user".to_string(),
-                content: text.clone(),
-            });
             app.begin_assistant();
 
             let tx2 = tx.clone();
             let client2 = client.clone();
             let server2 = server.clone();
             let token2 = token.clone();
-            let conv2 = conv_id.clone();
+            let conv2 = current_conv_id.clone();
             let agent2 = current_agent_id.clone();
             let model2 = current_model.clone();
-            let msgs2 = messages.clone();
+            let text2 = text.clone();
             tokio::spawn(async move {
                 send_message_tui(
                     &client2,
                     &server2,
                     &token2,
-                    &conv2,
+                    conv2.as_deref(),
                     agent2.as_deref(),
                     &model2,
-                    &msgs2,
+                    &text2,
                     tx2,
                 )
                 .await;
             });
 
-            save_last_conv_id(&conv_id);
+            if let Some(id) = &current_conv_id {
+                save_last_conv_id(id);
+            }
         }
 
         draw(&mut terminal, &mut app)?;

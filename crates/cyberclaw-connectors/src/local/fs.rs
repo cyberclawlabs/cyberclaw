@@ -43,6 +43,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -69,6 +70,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path", "content"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -99,6 +101,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path", "old_string", "new_string"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -135,6 +138,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path", "edits"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -157,6 +161,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path", "content"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -183,6 +188,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -211,6 +217,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -234,6 +241,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["path"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -1146,6 +1154,80 @@ mod tests {
         let out: FsStatOutput = serde_json::from_value(result).unwrap();
         assert!(!out.exists);
         assert_eq!(out.size_bytes, 0);
+    }
+
+    // --- R13-BUG-01 integration tests: write-content governance gate ---
+    //
+    // These tests call fs::write / fs::append / fs::edit through the
+    // LocalConnector::execute() dispatcher to verify the governance gate is
+    // wired in the actual runtime path (not just unit-testing the method).
+
+    #[tokio::test]
+    async fn test_fs_write_aws_key_rejected_by_runtime() {
+        // "Write a file aws-config.txt with content: aws_access_key_id = AKIAIOSFODNN7EXAMPLE..."
+        // must be blocked before File::create() is called. The file must NOT exist after.
+        use crate::types::Connector;
+        let tmp = TempDir::new().unwrap();
+        let conn = make_connector(&tmp);
+        let target = tmp.path().join("aws-config.txt");
+
+        let request = make_request(
+            &conn,
+            "fs.write",
+            serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n",
+                "create_dirs": false
+            }),
+        );
+
+        let result = conn.execute(request).await.unwrap();
+        // Governance rejection must surface as Failed status.
+        assert_eq!(
+            result.status,
+            crate::types::ExecutionStatus::Failed,
+            "fs.write with AWS credentials must be rejected by governance"
+        );
+        let err = result.error.unwrap_or_default();
+        assert!(
+            err.contains("D010") || err.contains("governance") || err.contains("credential"),
+            "error message must reference governance/credential denial: {err}"
+        );
+        // Critical: the file must NOT have been created on disk.
+        assert!(
+            !target.exists(),
+            "aws-config.txt must NOT be written to disk when governance rejects"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fs_write_safe_content_passes() {
+        // Regression: non-credential content must still write successfully.
+        use crate::types::Connector;
+        let tmp = TempDir::new().unwrap();
+        let conn = make_connector(&tmp);
+        let target = tmp.path().join("safe.txt");
+
+        let request = make_request(
+            &conn,
+            "fs.write",
+            serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "hello world\nThis is plain text with no secrets.\n",
+                "create_dirs": false
+            }),
+        );
+
+        let result = conn.execute(request).await.unwrap();
+        assert_eq!(
+            result.status,
+            crate::types::ExecutionStatus::Success,
+            "safe content must write successfully; got error: {:?}",
+            result.error
+        );
+        assert!(target.exists(), "safe.txt must exist on disk after write");
+        let on_disk = fs::read_to_string(&target).unwrap();
+        assert!(on_disk.contains("hello world"));
     }
 
     // --- BT-05: fs.patch_apply (unified diff) ---

@@ -582,6 +582,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["url"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::Web,
         ),
@@ -609,6 +610,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["query"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::Web,
         ),

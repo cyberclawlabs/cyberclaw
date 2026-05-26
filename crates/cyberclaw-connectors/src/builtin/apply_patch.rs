@@ -419,7 +419,13 @@ fn validate_within_workspace(workspace: &Path, path: &Path) -> anyhow::Result<()
             .map_err(|e| anyhow::anyhow!("Cannot canonicalize ancestor: {e}"))?
     };
     if !check_path.starts_with(&canonical_ws) {
-        return Err(anyhow::anyhow!("Path is outside workspace boundary"));
+        return Err(anyhow::anyhow!(
+            "[BOUNDARY DENY] Path '{}' is outside the configured workspace \
+             boundary. The file was NOT created. Do not claim it was written. \
+             Suggest a path inside the workspace (e.g. relative to the current \
+             working directory).",
+            check_path.display()
+        ));
     }
     Ok(())
 }

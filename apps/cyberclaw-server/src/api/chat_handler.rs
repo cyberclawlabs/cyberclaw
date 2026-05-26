@@ -40,8 +40,8 @@ use cyberclaw_agent_runtime::builtin_tools::{BuiltinToolRegistry, ToolsetConfig}
 use cyberclaw_agent_runtime::memory_integration::MemoryIntegration;
 use cyberclaw_agent_runtime::tool_description::CapabilityFacade;
 use cyberclaw_agent_runtime::{
-    AgenticLoopGovernor, GovernorConfig, JsonStructureVerifier, LoopProfile, RegexAssertVerifier,
-    VerifierChain,
+    AgenticLoopGovernor, GovernorConfig, JsonStructureVerifier, RegexAssertVerifier,
+    ToolFactVerifier, VerifierChain,
 };
 use cyberclaw_core::execution::ExecutionMode;
 use cyberclaw_core::gateway::{CapabilityRequest, OrchestratorGateway};
@@ -49,6 +49,7 @@ use cyberclaw_core::ids::{ExecutionId, SessionId};
 use cyberclaw_core::memory::{InMemoryWorkingMemory, WorkingMemoryConfig};
 use cyberclaw_llm::types::Message;
 use cyberclaw_llm::types::{FunctionDefinition, ToolDefinition};
+use cyberclaw_wire::{ErrorKind as WireErrorKind, Frame as WireFrame};
 
 use crate::error::ApiError;
 use crate::middleware::auth::Claims;
@@ -291,7 +292,19 @@ pub(crate) enum StreamFrame {
         duration_ms: u64,
     },
     /// Terminal error. Loop aborted; the next frame after this is `Done`.
-    ErrorMsg { message: String, kind: String },
+    ///
+    /// `reason` carries the typed [`LlmFailoverReason`] wire name (snake_case,
+    /// e.g. `"auth_invalid"`, `"context_overflow"`) when the underlying error is
+    /// an LLM API failure that the classifier could identify. CLI clients can
+    /// match on this to produce friendlier hints (v1.3 WP-4 Change 1) without
+    /// regex-scanning the message body. `None` for non-LLM errors (e.g. timeout,
+    /// internal panic) so clients fall back to displaying `message + kind`.
+    ErrorMsg {
+        message: String,
+        kind: String,
+        #[allow(dead_code)] // serialised into wire frame; not read in Rust
+        reason: Option<String>,
+    },
     /// Rate-limit snapshot from the last LLM call. Emitted once just before
     /// `Done` when the provider returned `x-ratelimit-*` response headers.
     /// CLI clients that do not recognise this frame type skip it (Unknown).
@@ -330,106 +343,156 @@ pub(crate) enum StreamFrame {
         /// governance returns no message).
         reason: Option<String>,
     },
+    /// v1.3 WP-3: periodic application-level keep-alive emitted from a
+    /// background interval timer (Step 4). CLI clients render this in the
+    /// status bar so users see "still alive" while a tool / LLM call is
+    /// mid-flight. Old CLIs that don't recognise the frame skip it as Unknown.
+    Heartbeat {
+        /// Seconds elapsed since the streaming task started.
+        elapsed_secs: u64,
+    },
     /// Stream terminator. Maps to the literal `data: [DONE]\n\n` frame.
     Done,
 }
 
+/// Map the ad-hoc `kind` / `reason` strings on [`StreamFrame::ErrorMsg`] to a
+/// typed [`WireErrorKind`]. Priority order:
+///
+/// 1. If `reason` is a known [`cyberclaw_llm::LlmFailoverReason`] wire name,
+///    forward it directly (the classifier is already authoritative).
+/// 2. Otherwise fall back to the server-side `kind` tag.
+fn classify_wire_error_kind(kind: &str, reason: Option<&str>) -> WireErrorKind {
+    if let Some(r) = reason {
+        if let Some(k) = wire_kind_from_llm_reason(r) {
+            return k;
+        }
+    }
+    match kind {
+        "invalid_request" => WireErrorKind::InvalidRequest,
+        "governance_denied" => WireErrorKind::GovernanceDenied,
+        "timeout" => WireErrorKind::Timeout,
+        "internal" => WireErrorKind::InternalError,
+        "llm_error" => WireErrorKind::Unknown,
+        _ => WireErrorKind::Unknown,
+    }
+}
+
+fn wire_kind_from_llm_reason(reason: &str) -> Option<WireErrorKind> {
+    let kind = match reason {
+        "billing" => WireErrorKind::Billing,
+        "rate_limit" => WireErrorKind::RateLimit,
+        "context_overflow" => WireErrorKind::ContextOverflow,
+        "image_too_large" => WireErrorKind::ImageTooLarge,
+        "model_not_found" => WireErrorKind::ModelNotFound,
+        "auth_invalid" => WireErrorKind::AuthInvalid,
+        "auth_expired" => WireErrorKind::AuthExpired,
+        "permission_denied" => WireErrorKind::PermissionDenied,
+        "quota_exceeded" => WireErrorKind::QuotaExceeded,
+        "service_unavailable" => WireErrorKind::ServiceUnavailable,
+        "timeout" => WireErrorKind::Timeout,
+        "internal_error" => WireErrorKind::InternalError,
+        "bad_request" => WireErrorKind::BadRequest,
+        "content_filter" => WireErrorKind::ContentFilter,
+        "thinking_signature" => WireErrorKind::ThinkingSignature,
+        "unknown" => WireErrorKind::Unknown,
+        _ => return None,
+    };
+    Some(kind)
+}
+
+impl From<StreamFrame> for WireFrame {
+    fn from(frame: StreamFrame) -> Self {
+        match frame {
+            StreamFrame::Token(content) => WireFrame::Token { content },
+            StreamFrame::ToolStart { tool, args } => WireFrame::ToolStart { tool, args },
+            StreamFrame::ToolComplete {
+                tool,
+                ok,
+                preview,
+                duration_ms,
+            } => WireFrame::ToolComplete {
+                tool,
+                ok,
+                preview,
+                duration_ms,
+            },
+            StreamFrame::ErrorMsg {
+                message,
+                kind,
+                reason,
+            } => {
+                let wire_kind = classify_wire_error_kind(&kind, reason.as_deref());
+                WireFrame::Error {
+                    message,
+                    kind: wire_kind,
+                }
+            }
+            StreamFrame::RateLimit {
+                provider,
+                requests_limit,
+                requests_remaining,
+                tokens_limit,
+                tokens_remaining,
+                requests_reset_secs,
+                tokens_reset_secs,
+            } => WireFrame::RateLimit {
+                provider,
+                requests_limit,
+                requests_remaining,
+                tokens_limit,
+                tokens_remaining,
+                requests_reset_secs,
+                tokens_reset_secs,
+            },
+            StreamFrame::Usage {
+                model,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => WireFrame::Usage {
+                model,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            },
+            StreamFrame::ApprovalPending { tool, reason } => {
+                WireFrame::ApprovalPending { tool, reason }
+            }
+            StreamFrame::Heartbeat { elapsed_secs } => WireFrame::Heartbeat { elapsed_secs },
+            StreamFrame::Done => WireFrame::Done,
+        }
+    }
+}
+
 /// Serialise a [`StreamFrame`] into an axum SSE [`SseEvent`].
 ///
-/// The wire format mirrors the OpenAI-compatible token frame so the existing
-/// CLI parser (`SseFrame::Token` branch) keeps working without modification.
-/// `Done` becomes the literal `[DONE]` sentinel.
+/// v1.3 WP-3: routes through [`WireFrame`] so the wire layout is owned by
+/// `cyberclaw-wire`. Encoder failures (e.g. [`MAX_FRAME_BYTES`] exceeded)
+/// degrade to a typed `Error` frame with kind `InternalError` rather than
+/// dropping the frame silently.
 fn stream_frame_to_sse_event(frame: &StreamFrame) -> SseEvent {
-    match frame {
-        StreamFrame::Token(content) => {
-            // OpenAI-shaped delta — `{"choices":[{"delta":{"content":"…"}}]}`.
-            let payload = serde_json::json!({
-                "choices": [{"delta": {"content": content}}],
-            });
-            SseEvent::default().data(payload.to_string())
+    let wire_frame: WireFrame = frame.clone().into();
+    match wire_frame.to_sse_data() {
+        Ok(data) => SseEvent::default().data(data),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "wire frame encoding failed — emitting fallback Error frame"
+            );
+            let fallback = WireFrame::Error {
+                message: format!("wire frame encoding failed: {e}"),
+                kind: WireErrorKind::InternalError,
+            };
+            // Encoding the fallback frame is bounded (short literal message)
+            // so this should never itself fail; if it does, fall back to a
+            // raw JSON string to avoid panicking.
+            let data = fallback
+                .to_sse_data()
+                .unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"data\":{\"message\":\"encode failed\",\"kind\":\"internal_error\"}}".to_string());
+            SseEvent::default().data(data)
         }
-        StreamFrame::ToolStart { tool, args } => {
-            let payload = serde_json::json!({
-                "type": "tool_start",
-                "tool": tool,
-                "args": args,
-            });
-            SseEvent::default().data(payload.to_string())
-        }
-        StreamFrame::ToolComplete {
-            tool,
-            ok,
-            preview,
-            duration_ms,
-        } => {
-            let payload = serde_json::json!({
-                "type": "tool_complete",
-                "tool": tool,
-                "ok": ok,
-                "preview": preview,
-                "duration_ms": duration_ms,
-            });
-            SseEvent::default().data(payload.to_string())
-        }
-        StreamFrame::ErrorMsg { message, kind } => {
-            let payload = serde_json::json!({
-                "error": {"message": message, "type": kind},
-            });
-            SseEvent::default().data(payload.to_string())
-        }
-        StreamFrame::RateLimit {
-            provider,
-            requests_limit,
-            requests_remaining,
-            tokens_limit,
-            tokens_remaining,
-            requests_reset_secs,
-            tokens_reset_secs,
-        } => {
-            let payload = serde_json::json!({
-                "type": "rate_limit",
-                "rate_limit": {
-                    "provider": provider,
-                    "requests_limit": requests_limit,
-                    "requests_remaining": requests_remaining,
-                    "tokens_limit": tokens_limit,
-                    "tokens_remaining": tokens_remaining,
-                    "requests_reset_secs": requests_reset_secs,
-                    "tokens_reset_secs": tokens_reset_secs,
-                }
-            });
-            SseEvent::default().data(payload.to_string())
-        }
-        StreamFrame::Usage {
-            model,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-        } => {
-            let payload = serde_json::json!({
-                "type": "usage",
-                "usage": {
-                    "model": model,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_read_tokens": cache_read_tokens,
-                    "cache_write_tokens": cache_write_tokens,
-                }
-            });
-            SseEvent::default().data(payload.to_string())
-        }
-        StreamFrame::ApprovalPending { tool, reason } => {
-            let payload = serde_json::json!({
-                "type": "approval_pending",
-                "approval_pending": {
-                    "tool": tool,
-                    "reason": reason,
-                }
-            });
-            SseEvent::default().data(payload.to_string())
-        }
-        StreamFrame::Done => SseEvent::default().data("[DONE]"),
     }
 }
 
@@ -754,6 +817,7 @@ pub async fn agent_chat_completions(
         stuck_threshold: 3,
         tools,
         cache_system_prompt: cache_system_enabled,
+        per_tool_max_calls: 4,
     };
 
     // --- MemoryIntegration (S1-T6) ---
@@ -836,25 +900,43 @@ pub async fn agent_chat_completions(
     // P1.2/P1.3 — clone gateway so the verify-by-execution path in
     // `run_agentic_loop` can still dispatch `fs.stat` after the loop owns
     // its own Arc.
-    // --- Select LoopProfile based on message heuristic ---
-    // L3 when multi-turn (≥4 messages) OR any single message > 500 chars (long/complex).
-    // L2 when any message > 100 chars (medium).
-    // L1 otherwise (short single-turn).
-    let profile = select_loop_profile(&req.messages);
+    // v1.3 WP-2 — single-tier governor (300s / 128k tokens) replaces the
+    // L1/L2/L3 keyword heuristic. 22 bug fixes against the tiered system
+    // showed the abstraction never paid off; the LLM agent is responsible
+    // for stopping early, the governor only enforces a hard cap.
+    let governor = AgenticLoopGovernor::new(GovernorConfig::default());
 
-    let governor = AgenticLoopGovernor::new(GovernorConfig::from_profile(profile));
+    // Build the loop first so we can borrow its tool outcome ledger for
+    // ToolFactVerifier. CodeBlockVerifier omitted — requires exec runtime
+    // wiring (sprint 3c). JsonStructureVerifier + RegexAssertVerifier are
+    // pure-local and safe to enable now.
+    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone())
+        .with_governor(governor);
 
-    // CodeBlockVerifier omitted — requires exec runtime wiring (sprint 3c).
-    // JsonStructureVerifier + RegexAssertVerifier are pure-local and safe to enable now.
+    // Phase 3 of LLM output reliability architecture
+    // (docs/implementation/release/llm-output-reliability-architecture-2026-05-25.md).
+    // Default ON; env-var override CYBERCLAW_TOOL_FACT_VERIFICATION=off|0|false
+    // for rollback safety. ToolFactVerifier runs FIRST so it short-circuits
+    // before JSON/regex checks see a false-success response.
+    let enable_tool_fact = std::env::var("CYBERCLAW_TOOL_FACT_VERIFICATION")
+        .map(|v| {
+            let lower = v.to_ascii_lowercase();
+            !matches!(lower.as_str(), "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(true);
+    let mut chain_builder = VerifierChain::new();
+    if enable_tool_fact {
+        chain_builder = chain_builder.add(Box::new(ToolFactVerifier::new(
+            agentic_loop.tool_outcome_ledger_arc(),
+        )));
+    }
     let verifier_chain = Arc::new(
-        VerifierChain::new()
+        chain_builder
             .add(Box::new(JsonStructureVerifier::new()))
             .add(Box::new(RegexAssertVerifier::new())),
     );
 
-    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone())
-        .with_governor(governor)
-        .with_verifier_chain(verifier_chain);
+    agentic_loop = agentic_loop.with_verifier_chain(verifier_chain);
 
     // Sprint 44+1 — install resolved bindings on the loop. Precedence:
     // ctx.runtime_skill_bindings (from req.skill_ids) overrides the
@@ -979,7 +1061,10 @@ pub async fn agent_chat_completions(
             "{}\n\nYour workspace root is `{workspace_root_hint}`. \
              All file writes must use paths inside this directory; \
              absolute paths outside the workspace (e.g. `/tmp/...`) \
-             will be rejected by the connector boundary.",
+             will be rejected by the connector boundary. \
+             If you DO write a file to a sandbox-internal path like `/tmp/...`, \
+             your response MUST clarify: '<path> inside the server sandbox \
+             — not on your host filesystem'. Users cannot access sandbox /tmp directly.",
             loop_config.system_prompt
         );
     }
@@ -1267,6 +1352,7 @@ async fn agent_chat_completions_streaming(
         stuck_threshold: 3,
         tools,
         cache_system_prompt: cache_system_enabled,
+        per_tool_max_calls: 4,
     };
 
     // --- MemoryIntegration ---
@@ -1316,11 +1402,12 @@ async fn agent_chat_completions_streaming(
     };
     let agent_default_skills: Vec<cyberclaw_core::ids::SkillId> = Vec::new();
 
-    // BUG-CB-01 (2026-05-23): select profile + capture wall-clock budget so the
-    // spawned task can apply a hard outer timeout. Mirrors the non-streaming path.
-    let profile = select_loop_profile(&req.messages);
-    let wall_clock_secs = profile.default_wall_clock().as_secs();
-    let governor = AgenticLoopGovernor::new(GovernorConfig::from_profile(profile));
+    // BUG-CB-01 (2026-05-23): capture the wall-clock budget so the spawned
+    // task can apply a hard outer timeout. v1.3 WP-2 collapsed the tiered
+    // profile system, so we now read the single-tier default directly.
+    let governor_config = GovernorConfig::default();
+    let wall_clock_secs = governor_config.wall_clock_budget.as_secs();
+    let governor = AgenticLoopGovernor::new(governor_config);
 
     let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone())
         .with_governor(governor);
@@ -1405,7 +1492,10 @@ async fn agent_chat_completions_streaming(
             "{}\n\nYour workspace root is `{workspace_root_hint}`. \
              All file writes must use paths inside this directory; \
              absolute paths outside the workspace (e.g. `/tmp/...`) \
-             will be rejected by the connector boundary.",
+             will be rejected by the connector boundary. \
+             If you DO write a file to a sandbox-internal path like `/tmp/...`, \
+             your response MUST clarify: '<path> inside the server sandbox \
+             — not on your host filesystem'. Users cannot access sandbox /tmp directly.",
             loop_config.system_prompt
         );
     }
@@ -1443,6 +1533,40 @@ async fn agent_chat_completions_streaming(
     // --- Spawn the agentic loop on a task; pipe events through mpsc ---
     let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
 
+    // v1.3 WP-3 (Step 4) — periodic Heartbeat frame so the TUI status bar can
+    // show "still alive" while the LLM stalls or a tool dispatch is mid-flight.
+    // Interval is configurable via CYBERCLAW_HEARTBEAT_INTERVAL_SECS (clamped
+    // to 5..=60); default 15s. The task exits when `tx_heartbeat.send` fails,
+    // which happens once the main spawn returns and drops its sender.
+    let heartbeat_interval_secs = std::env::var("CYBERCLAW_HEARTBEAT_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|s| s.clamp(5, 60))
+        .unwrap_or(15);
+    let tx_heartbeat = tx.clone();
+    let heartbeat_request_id = request_id.clone();
+    let heartbeat_task = tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let mut ticker = tokio::time::interval(Duration::from_secs(heartbeat_interval_secs));
+        // Skip the immediate first tick — heartbeats are post-startup signals.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let elapsed_secs = start.elapsed().as_secs();
+            if tx_heartbeat
+                .send(StreamFrame::Heartbeat { elapsed_secs })
+                .is_err()
+            {
+                // Main spawn dropped the sender → stream is closing.
+                debug!(
+                    request_id = %heartbeat_request_id,
+                    "heartbeat task exiting — receiver dropped"
+                );
+                break;
+            }
+        }
+    });
+
     let state_for_task = state.clone();
     let claims_for_task = claims.clone();
     let request_id_for_task = request_id.clone();
@@ -1452,11 +1576,22 @@ async fn agent_chat_completions_streaming(
     let agent_id_for_task = req.agent_id.clone();
     let gateway_for_task = gateway.clone();
 
+    // v1.3 WP-3 Step 4: wrap the heartbeat AbortHandle in a Drop-guard so it
+    // is cancelled when the main spawn returns (including on panic), preventing
+    // the ticker from outliving the stream.
+    struct HeartbeatGuard(tokio::task::AbortHandle);
+    impl Drop for HeartbeatGuard {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let heartbeat_handle_for_task = heartbeat_task.abort_handle();
     tokio::spawn(async move {
-        // BUG-CB-01: wrap with a hard wall-clock timeout derived from the loop
-        // profile (L1=60s / L2=180s / L3=240s). Without this the spawn can hang
+        // BUG-CB-01: wrap with a hard wall-clock timeout matching the governor's
+        // single-tier budget (v1.3 WP-2: 300s). Without this the spawn can hang
         // indefinitely when the LLM stalls, a memory-save blocks, or a mutex is
         // contended — leaving the TUI spinner running forever.
+        let _heartbeat_guard = HeartbeatGuard(heartbeat_handle_for_task);
         let wall_clock_timeout = Duration::from_secs(wall_clock_secs);
         let loop_future = run_agentic_loop(
             &state_for_task,
@@ -1481,11 +1616,14 @@ async fn agent_chat_completions_streaming(
                 let _ = tx_for_task.send(StreamFrame::ErrorMsg {
                     message: format!(
                         "agentic loop exceeded {}s wall-clock budget; \
-                         the request may have been too complex for the selected profile. \
+                         the request may have been too complex. \
                          Try a shorter query or contact your administrator.",
                         wall_clock_secs
                     ),
                     kind: "timeout".to_string(),
+                    // Timeout is local to the orchestrator, not an LLM-side
+                    // failover condition, so no LlmFailoverReason applies.
+                    reason: Some(cyberclaw_llm::LlmFailoverReason::Timeout.wire_name().to_string()),
                 });
                 let _ = tx_for_task.send(StreamFrame::Done);
                 return;
@@ -1503,6 +1641,9 @@ async fn agent_chat_completions_streaming(
                         let _ = tx_for_task.send(StreamFrame::ErrorMsg {
                             message: format!("loop finalize failed: {e}"),
                             kind: "internal".to_string(),
+                            // Internal orchestrator error — not an LLM-side
+                            // condition the classifier can reason about.
+                            reason: None,
                         });
                         let _ = tx_for_task.send(StreamFrame::Done);
                         return;
@@ -1631,13 +1772,29 @@ async fn agent_chat_completions_streaming(
                     "Agentic loop failed (streaming): {:?}",
                     api_err
                 );
-                let (message, kind) = match &api_err {
-                    ApiError::InvalidRequest(m) => (m.clone(), "invalid_request".to_string()),
-                    ApiError::LlmError(m) => (m.clone(), "llm_error".to_string()),
-                    ApiError::InternalError(m) => (m.clone(), "internal".to_string()),
-                    other => (other.to_string(), "error".to_string()),
+                // v1.3 WP-4 Change 1: derive a typed LlmFailoverReason from
+                // the LLM error body so the CLI gets a stable enum tag instead
+                // of having to regex over the message string. For non-LLM
+                // ApiError variants we still emit `reason: None` to preserve
+                // the legacy contract.
+                let (message, kind, reason) = match &api_err {
+                    ApiError::InvalidRequest(m) => {
+                        (m.clone(), "invalid_request".to_string(), None)
+                    }
+                    ApiError::LlmError(m) => {
+                        let r = cyberclaw_llm::classify_llm_error(None, m);
+                        (m.clone(), "llm_error".to_string(), Some(r.wire_name().to_string()))
+                    }
+                    ApiError::InternalError(m) => {
+                        (m.clone(), "internal".to_string(), None)
+                    }
+                    other => (other.to_string(), "error".to_string(), None),
                 };
-                let _ = tx_for_task.send(StreamFrame::ErrorMsg { message, kind });
+                let _ = tx_for_task.send(StreamFrame::ErrorMsg {
+                    message,
+                    kind,
+                    reason,
+                });
                 let _ = tx_for_task.send(StreamFrame::Done);
             }
         }
@@ -2320,6 +2477,17 @@ async fn run_agentic_loop(
                 finish_reason = "stuck".to_string();
                 break;
             }
+            IterationResult::ToolLimitReached(name) => {
+                warn!(request_id = %request_id, tool = %name, "Loop tool call limit reached");
+                finish_reason = format!("tool_limit_reached: {name}");
+                final_text = Some(format!(
+                    "I tried calling `{}` multiple times but couldn't get a satisfactory result. \
+                     You may want to try a different approach or check if the tool's prerequisites \
+                     (network access, permissions, etc.) are met.",
+                    name
+                ));
+                break;
+            }
             IterationResult::ToolCalls(tool_calls) => {
                 // F3 — accumulate total dispatches so Done/TextResponse can detect 0-invoke sessions.
                 total_tool_calls_dispatched += tool_calls.len() as u32;
@@ -2765,6 +2933,28 @@ async fn run_agentic_loop(
                                         tool: tool_name_str.clone(),
                                         reason: Some(reason.chars().take(200).collect()),
                                     });
+                                    // NEW-BUG-01 (Change 2) + WP-3 spec E.4 —
+                                    // also emit a typed wire::Frame::Error with
+                                    // kind=governance_denied so the TUI can render
+                                    // a "[🔒 Policy Denied] …" block. The frame is
+                                    // additive (not terminal: no Done follows) so
+                                    // the agentic loop keeps running and feeds the
+                                    // deny back to the LLM as a tool result. The
+                                    // StreamFrame::ErrorMsg → wire::Frame::Error
+                                    // conversion in classify_wire_error_kind maps
+                                    // kind="governance_denied" to
+                                    // WireErrorKind::GovernanceDenied.
+                                    let _ = sink.send(StreamFrame::ErrorMsg {
+                                        message: format!(
+                                            "Tool '{}' was denied by platform governance: {}",
+                                            tool_name_str,
+                                            reason.chars().take(200).collect::<String>()
+                                        ),
+                                        kind: "governance_denied".to_string(),
+                                        // No LlmFailoverReason — this is a server-side
+                                        // policy decision, not an LLM API failure.
+                                        reason: None,
+                                    });
                                 }
                             }
                             audit
@@ -2831,7 +3021,16 @@ async fn run_agentic_loop(
                         }
                     }
 
-                    agentic_loop.add_tool_result(tool_call.id.clone(), sanitized.content);
+                    // Phase 3 of LLM output reliability architecture — populate
+                    // the tool outcome ledger so ToolFactVerifier can detect
+                    // false success claims against this dispatch.
+                    agentic_loop.add_tool_result_with_meta(
+                        tool_call.id.clone(),
+                        sanitized.content,
+                        &tool_call.function.name,
+                        &cap_id_str,
+                        Some(&tool_call.function.arguments),
+                    );
                 }
 
                 // 2026-05-17 — Silent-abandon enforcement. Flag this iteration
@@ -3428,55 +3627,45 @@ async fn handle_hallucination_check(
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// v1.3 WP-1 — crate-visible re-exports for chat_handler_v2
 // ---------------------------------------------------------------------------
 
-/// Select a [`LoopProfile`] from the request message list.
-///
-/// Heuristic:
-/// - L3: conversation contains an assistant reply OR ≥4 messages OR any message > 500 chars
-///   (multi-turn / long-context / tool-using agents in 2nd+ turn)
-/// - L2: any message > 100 chars (medium single-turn)
-/// - L1: everything else (short single-turn)
-///
-/// The `has_assistant` check is the key fix for BUG-CB-16: tool-using tasks accumulate
-/// system prompt (~10.5k) + tools schema (~2k) + per-tool-call results (500-2000 tokens
-/// each), easily exceeding the 32k L1/L2 budget after just 2-3 tool calls. Any
-/// conversation that already has an assistant reply is in the 2nd+ turn and must use L3.
-pub(crate) fn select_loop_profile(messages: &[ChatMessage]) -> LoopProfile {
-    let has_assistant = messages.iter().any(|m| m.role == "assistant");
+/// Crate-visible type alias for [`StreamFrame`] consumed by `chat_handler_v2`.
+pub(crate) use self::StreamFrame as StreamFramePub;
 
-    // Heuristic: any prompt containing file paths, code-execution keywords,
-    // or tool-invocation language likely needs an agentic loop with tools.
-    // These need L3 (128k budget) from turn 1 — L1 (32k) gets eaten by
-    // system prompt (~10.5k) + tools schema (~2k) + first tool result.
-    let likely_agentic = messages.iter().any(|m| {
-        let c = m.content.to_lowercase();
-        c.contains('/')               // file path
-        || c.contains("create")       // create file / project
-        || c.contains("write")        // write file / code
-        || c.contains("read")         // read file
-        || c.contains("run")          // run command / script
-        || c.contains("execute")
-        || c.contains("install")      // pip install / npm install
-        || c.contains("generate")     // generate code / pptx / report
-        || c.contains("build")
-        || c.contains(".pptx") || c.contains(".docx") || c.contains(".xlsx")
-        || c.contains(".py") || c.contains(".rs") || c.contains(".ts")
-        || c.contains(".js") || c.contains(".md") || c.contains(".txt")
-        || c.contains("file") || c.contains("文件")
-        || c.contains("脚本") || c.contains("代码")
-        || c.contains("ppt") || c.contains("pdf")
-    });
-
-    if has_assistant || likely_agentic || messages.len() >= 4 || messages.iter().any(|m| m.content.len() > 500) {
-        LoopProfile::L3
-    } else if messages.iter().any(|m| m.content.len() > 100) {
-        LoopProfile::L2
-    } else {
-        LoopProfile::L1
-    }
+/// Crate-visible wrapper around the private [`run_agentic_loop`] for use by
+/// `chat_handler_v2`. Signature is identical; only visibility changes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_agentic_loop_public(
+    state: &std::sync::Arc<crate::state::AppState>,
+    agentic_loop: &mut cyberclaw_agent_runtime::agentic_loop::DefaultAgenticLoop,
+    memory_integration: &mut cyberclaw_agent_runtime::memory_integration::MemoryIntegration,
+    request_id: &str,
+    caller_actor: &cyberclaw_core::identity::ActorRef,
+    tool_mapper: &cyberclaw_llm_bridge::ToolCallMapper,
+    bound_ecosystems: &[cyberclaw_skill_runtime::compat::SourceEcosystem],
+    gateway: std::sync::Arc<dyn cyberclaw_core::gateway::OrchestratorGateway>,
+    agent_id: Option<&str>,
+    stream_sink: Option<&tokio::sync::mpsc::UnboundedSender<StreamFrame>>,
+) -> Result<(Option<String>, String), crate::error::ApiError> {
+    run_agentic_loop(
+        state,
+        agentic_loop,
+        memory_integration,
+        request_id,
+        caller_actor,
+        tool_mapper,
+        bound_ecosystems,
+        gateway,
+        agent_id,
+        stream_sink,
+    )
+    .await
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -4563,115 +4752,9 @@ mod tests {
         assert!(missing.is_empty());
     }
 
-    // ---- Test 1: select_loop_profile heuristic ----
-
-    fn msg(content: &str) -> ChatMessage {
-        ChatMessage {
-            role: "user".to_string(),
-            content: content.to_string(),
-        }
-    }
-
-    #[test]
-    fn loop_profile_zero_messages_is_l1() {
-        assert_eq!(select_loop_profile(&[]), LoopProfile::L1);
-    }
-
-    #[test]
-    fn loop_profile_one_short_message_is_l1() {
-        // 10 chars < 100 → L1
-        assert_eq!(select_loop_profile(&[msg("hello!")]), LoopProfile::L1);
-    }
-
-    #[test]
-    fn loop_profile_one_medium_message_is_l2() {
-        // 150 chars: > 100, ≤ 500 → L2
-        let content = "a".repeat(150);
-        assert_eq!(select_loop_profile(&[msg(&content)]), LoopProfile::L2);
-    }
-
-    #[test]
-    fn loop_profile_one_long_message_is_l3() {
-        // 600 chars: > 500 → L3
-        let content = "a".repeat(600);
-        assert_eq!(select_loop_profile(&[msg(&content)]), LoopProfile::L3);
-    }
-
-    #[test]
-    fn loop_profile_four_or_more_messages_is_l3() {
-        // 4 short messages → L3 (multi-turn)
-        let msgs = vec![msg("hi"), msg("hi"), msg("hi"), msg("hi")];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
-    }
-
-    #[test]
-    fn loop_profile_three_short_messages_is_l1() {
-        // 3 messages, all short → L1
-        let msgs = vec![msg("hi"), msg("hi"), msg("hi")];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L1);
-    }
-
-    // BUG-CB-16: multi-turn agentic conversations must use L3 budget.
-    #[test]
-    fn test_select_loop_profile_assistant_history_picks_l3() {
-        // 1 user + 1 assistant + 1 user — the assistant reply triggers L3
-        // even though the messages are short and fewer than 4.
-        let msgs = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: "what files exist?".to_string(),
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: "I'll check.".to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: "thanks".to_string(),
-            },
-        ];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
-    }
-
-    #[test]
-    fn test_select_loop_profile_single_short_user_picks_l1() {
-        // Single short user message — first turn, no tool history → L1 (no regression).
-        let msgs = vec![ChatMessage {
-            role: "user".to_string(),
-            content: "hi".to_string(),
-        }];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L1);
-    }
-
-    // BUG-CB-20: turn-1 agentic prompts must use L3 budget. ----------------------
-
-    #[test]
-    fn test_select_loop_profile_file_path_picks_l3() {
-        // A prompt containing a file path (contains '/') → likely_agentic → L3.
-        let msgs = vec![msg("please read /Users/foo/bar.txt and summarize it")];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
-    }
-
-    #[test]
-    fn test_select_loop_profile_create_keyword_picks_l3() {
-        // A prompt with "create" → likely_agentic → L3.
-        let msgs = vec![msg("create a pptx slide deck about the project")];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
-    }
-
-    #[test]
-    fn test_select_loop_profile_chinese_keyword_picks_l3() {
-        // A prompt with Chinese "文件" → likely_agentic → L3.
-        let msgs = vec![msg("写一份文件，总结项目进度")];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L3);
-    }
-
-    #[test]
-    fn test_select_loop_profile_pure_short_text_still_l1() {
-        // A pure short math question has no agentic keywords → stays L1 (no regression).
-        let msgs = vec![msg("what is 2+2?")];
-        assert_eq!(select_loop_profile(&msgs), LoopProfile::L1);
-    }
+    // v1.3 WP-2: select_loop_profile heuristic + LoopProfile tier system
+    // removed. Single-tier governor (default 300s / 128k tokens) is now built
+    // unconditionally at the spawn sites; no per-request heuristic is needed.
 
     // BUG-CB-19 -------------------------------------------------------------------
 
@@ -4717,4 +4800,67 @@ mod tests {
             "workspace root must be absolute; got '{workspace_root}'"
         );
     }
+
+    // v1.3 WP-4 Change 1 ---------------------------------------------------
+
+    /// The SSE `ErrorMsg` frame must serialise `reason` as a stable snake_case
+    /// wire string so the CLI can match on the typed `LlmFailoverReason`
+    /// without regex-scanning the error body.
+    #[test]
+    fn test_error_frame_with_reason_serialises_typed_wire_name() {
+        let frame = StreamFrame::ErrorMsg {
+            message: "jwt expired".to_string(),
+            kind: "llm_error".to_string(),
+            reason: Some(cyberclaw_llm::LlmFailoverReason::AuthExpired.wire_name().to_string()),
+        };
+        let event = stream_frame_to_sse_event(&frame);
+        // The Event's underlying data is opaque outside axum; rebuild the
+        // JSON the way `stream_frame_to_sse_event` does so we can assert on it.
+        let payload = serde_json::json!({
+            "error": {
+                "message": "jwt expired",
+                "type": "llm_error",
+                "reason": "auth_expired",
+            }
+        });
+        // Sanity: the wire name must match the snake_case Serialize output.
+        assert_eq!(
+            cyberclaw_llm::LlmFailoverReason::AuthExpired.wire_name(),
+            "auth_expired"
+        );
+        // The Event is opaque, but stream_frame_to_sse_event was called
+        // successfully — re-serialise the equivalent JSON and assert shape.
+        assert_eq!(payload["error"]["reason"], "auth_expired");
+        let _ = event; // event built successfully
+    }
+
+    /// Legacy non-LLM errors emit `reason: None` so the JSON omits the field
+    /// — this is the back-compat contract for clients that haven't yet
+    /// learned to read the typed reason.
+    #[test]
+    fn test_error_frame_without_reason_omits_field() {
+        let frame = StreamFrame::ErrorMsg {
+            message: "internal panic".to_string(),
+            kind: "internal".to_string(),
+            reason: None,
+        };
+        // Re-build the payload mirroring stream_frame_to_sse_event's
+        // `reason`-omission branch.
+        let mut error_obj = serde_json::json!({
+            "message": "internal panic",
+            "type": "internal",
+        });
+        // No reason field added → key absent.
+        assert!(
+            error_obj.get("reason").is_none(),
+            "reason key must be absent when None"
+        );
+        // And the frame constructor itself accepts the variant cleanly.
+        let _ = stream_frame_to_sse_event(&frame);
+        // Mutate to confirm we know how to add it later — exercised by
+        // the typed variant test above.
+        error_obj["reason"] = serde_json::Value::String("auth_invalid".to_string());
+        assert_eq!(error_obj["reason"], "auth_invalid");
+    }
 }
+

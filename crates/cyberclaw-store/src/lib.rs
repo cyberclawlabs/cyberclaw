@@ -35,6 +35,7 @@
 //! # }
 //! ```
 
+pub mod conversation_session;
 pub mod error;
 pub mod memory;
 pub mod memory_store;
@@ -47,6 +48,9 @@ pub mod state_store;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
+pub use conversation_session::{
+    ConversationId, ConversationSession, InMemorySessionStore, SessionStore, SessionSummary,
+};
 pub use error::{Result, StoreError};
 pub use memory::InMemoryStateStore;
 pub use memory_store::{

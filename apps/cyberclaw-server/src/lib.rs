@@ -142,6 +142,8 @@ pub fn create_router_with_config(state: Arc<AppState>, config: ServerConfig) -> 
         .merge(api::create_chat_compress_router())
         .merge(api::create_chat_conversations_router())
         .merge(api::create_agent_chat_router())
+        // v1.3 WP-1 — server-side conversation session endpoint.
+        .merge(api::create_agent_chat_v2_router())
         .merge(api::create_agents_router())
         .merge(api::create_tasks_router())
         .merge(api::create_executions_router())

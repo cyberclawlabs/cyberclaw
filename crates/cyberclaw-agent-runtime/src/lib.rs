@@ -48,14 +48,15 @@ pub use context_compressor::{
 };
 
 pub use loop_governor::{
-    AgenticLoopGovernor, BudgetUpgradeEvent, CostTracker, GovernorConfig, LoopCtx, LoopDecision,
-    LoopProfile,
+    AgenticLoopGovernor, CostTracker, GovernorConfig, LoopCtx, LoopDecision,
 };
 
 pub use verify::{
     CodeBlockVerifier, JsonStructureVerifier, OutputVerifier, RegexAssertVerifier,
-    VerificationDirective, VerifierChain, VerifyCtx,
+    ToolFactVerifier, VerificationDirective, VerifierChain, VerifyCtx,
 };
+
+pub use agentic_loop::{ToolOutcomeEntry, ToolStatus};
 
 pub use streaming::{
     ChannelStreamSink, StreamAdapter, StreamError, StreamEvent, StreamReceiver, StreamSink,

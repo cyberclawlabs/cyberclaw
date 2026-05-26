@@ -444,6 +444,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["csv_path", "expected"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::CodeAnalysis,
         ),

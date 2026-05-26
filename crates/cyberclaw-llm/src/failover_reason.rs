@@ -20,6 +20,7 @@
 
 use once_cell::sync::Lazy;
 use regex::RegexSet;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // LlmFailoverReason enum
@@ -29,7 +30,14 @@ use regex::RegexSet;
 ///
 /// Use [`classify_llm_error`] to obtain a reason from an HTTP status code and
 /// raw body string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// # Wire format
+///
+/// Serialized as snake_case strings (e.g. `"auth_invalid"`, `"context_overflow"`).
+/// This is the format used by the SSE `ErrorMsg` frame so the CLI can match on a
+/// stable typed enum instead of doing string-pattern matching on error bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LlmFailoverReason {
     /// Credit / billing exhaustion — rotate credential immediately.
     Billing,
@@ -102,6 +110,33 @@ impl LlmFailoverReason {
             self,
             Self::RateLimit | Self::Timeout | Self::ServiceUnavailable | Self::InternalError
         )
+    }
+
+    /// Stable snake_case wire name for the SSE error frame.
+    ///
+    /// Matches the `#[serde(rename_all = "snake_case")]` serialization.
+    /// Centralised so the server can emit a wire string without pulling in
+    /// `serde_json` for a single enum variant, and so the CLI can pattern-
+    /// match a known-good set of strings when deserialising legacy frames.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Billing => "billing",
+            Self::RateLimit => "rate_limit",
+            Self::ContextOverflow => "context_overflow",
+            Self::ImageTooLarge => "image_too_large",
+            Self::ModelNotFound => "model_not_found",
+            Self::AuthInvalid => "auth_invalid",
+            Self::AuthExpired => "auth_expired",
+            Self::PermissionDenied => "permission_denied",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::ServiceUnavailable => "service_unavailable",
+            Self::Timeout => "timeout",
+            Self::InternalError => "internal_error",
+            Self::BadRequest => "bad_request",
+            Self::ContentFilter => "content_filter",
+            Self::ThinkingSignature => "thinking_signature",
+            Self::Unknown => "unknown",
+        }
     }
 }
 

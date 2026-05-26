@@ -144,6 +144,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["command"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::Terminal,
         ),
@@ -186,6 +187,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["command"]
                 })),
                 exposure: FacadeExposure::LlmAdvanced,
+                workspace_root: None,
             },
             ToolsetCategory::Terminal,
         ),
@@ -224,6 +226,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["script"]
                 })),
                 exposure: FacadeExposure::LlmAdvanced,
+                workspace_root: None,
             },
             ToolsetCategory::Terminal,
         ),
@@ -1606,6 +1609,108 @@ mod tests {
             map.get(&host),
             Some(&std::path::PathBuf::from("/tmp")),
             "default mount: /tmp/cyberclaw-shared (host) → /tmp (container)",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // R13-BUG-01 extension — credential gate covers cmd.run / cmd.run_streaming
+    // -----------------------------------------------------------------------
+
+    /// Verify that a cmd.run request containing an AWS key in a shell redirect
+    /// is rejected by the R13-BUG-01 credential gate (via LocalConnector::execute)
+    /// before the command reaches bash.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cmd_run_aws_key_in_redirect_rejected_by_runtime() {
+        use crate::types::{Connector, ExecutionStatus as ConnectorExecutionStatus};
+
+        let tmp = TempDir::new().unwrap();
+        let connector = make_connector(&tmp);
+
+        // Build a full CapabilityExecutionRequest so it routes through
+        // LocalConnector::execute() and hits the write_caps gate in mod.rs.
+        let req = crate::types::CapabilityExecutionRequest {
+            execution_id: cyberclaw_core::ids::ExecutionId::new(),
+            trace_id: "test-trace-r13".to_string(),
+            actor: cyberclaw_core::identity::ActorRef {
+                id: cyberclaw_core::ids::ActorId::new(),
+                actor_type: cyberclaw_core::identity::ActorType::System,
+                tenant_id: None,
+                home_node_id: None,
+                display_name: "test".to_string(),
+            },
+            workspace: cyberclaw_core::workspace::WorkspaceRef {
+                id: cyberclaw_core::ids::WorkspaceId::new(),
+                mode: cyberclaw_core::workspace::WorkspaceMode::Isolated,
+                materialization_mode: None,
+                home_node_id: None,
+                backing_store: None,
+                root: connector.workspace().to_string_lossy().to_string(),
+                writable_roots: vec![connector.workspace().to_string_lossy().to_string()],
+            },
+            connector_id: cyberclaw_core::ids::ConnectorId::from_string("local".to_string())
+                .unwrap(),
+            capability_id: cyberclaw_core::ids::CapabilityId::from_string("cmd.run".to_string())
+                .unwrap(),
+            input: serde_json::json!({
+                "command": "echo \"aws_access_key_id = AKIAIOSFODNN7EXAMPLE\" > /tmp/test.txt"
+            }),
+        };
+
+        let result = connector.execute(req).await.unwrap();
+        assert_eq!(
+            result.status,
+            ConnectorExecutionStatus::Failed,
+            "cmd.run with credential in redirect must be rejected by the R13 gate"
+        );
+        let err_str = result.error.unwrap_or_default();
+        assert!(
+            err_str.contains("governance") || err_str.contains("D010") || err_str.contains("credential"),
+            "error should reference governance/credential block, got: {err_str}"
+        );
+    }
+
+    /// Regression: a safe cmd.run command (ls -la) must still pass through the
+    /// R13-BUG-01 credential gate without being blocked.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cmd_run_safe_command_passes() {
+        use crate::types::{Connector, ExecutionStatus as ConnectorExecutionStatus};
+
+        let tmp = TempDir::new().unwrap();
+        let connector = make_connector(&tmp);
+
+        let req = crate::types::CapabilityExecutionRequest {
+            execution_id: cyberclaw_core::ids::ExecutionId::new(),
+            trace_id: "test-trace-r13-safe".to_string(),
+            actor: cyberclaw_core::identity::ActorRef {
+                id: cyberclaw_core::ids::ActorId::new(),
+                actor_type: cyberclaw_core::identity::ActorType::System,
+                tenant_id: None,
+                home_node_id: None,
+                display_name: "test".to_string(),
+            },
+            workspace: cyberclaw_core::workspace::WorkspaceRef {
+                id: cyberclaw_core::ids::WorkspaceId::new(),
+                mode: cyberclaw_core::workspace::WorkspaceMode::Isolated,
+                materialization_mode: None,
+                home_node_id: None,
+                backing_store: None,
+                root: connector.workspace().to_string_lossy().to_string(),
+                writable_roots: vec![connector.workspace().to_string_lossy().to_string()],
+            },
+            connector_id: cyberclaw_core::ids::ConnectorId::from_string("local".to_string())
+                .unwrap(),
+            capability_id: cyberclaw_core::ids::CapabilityId::from_string("cmd.run".to_string())
+                .unwrap(),
+            input: serde_json::json!({ "command": "ls -la" }),
+        };
+
+        let result = connector.execute(req).await.unwrap();
+        assert_eq!(
+            result.status,
+            ConnectorExecutionStatus::Success,
+            "safe cmd.run (ls -la) must not be blocked by the credential gate"
         );
     }
 

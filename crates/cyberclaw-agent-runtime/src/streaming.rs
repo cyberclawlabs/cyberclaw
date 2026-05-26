@@ -77,19 +77,6 @@ pub enum StreamEvent {
     Error { message: String, recoverable: bool },
     /// The stream is complete.
     Done { summary: StreamSummary },
-    /// The loop governor promoted the token budget to a higher tier.
-    ///
-    /// BUG-R8-01: emitted when `try_upgrade()` fires inside `pre_iteration`.
-    /// Callers may surface this as an SSE frame so operators can observe
-    /// dynamic budget promotions in real time.
-    BudgetUpgraded {
-        /// Profile name before upgrade (e.g. `"L1"`).
-        from_profile: String,
-        /// Profile name after upgrade (e.g. `"L2"`).
-        to_profile: String,
-        /// New token ceiling after the upgrade.
-        new_token_ceiling: u64,
-    },
 }
 
 // ---------------------------------------------------------------------------

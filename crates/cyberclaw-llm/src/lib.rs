@@ -52,6 +52,7 @@ pub use client::LlmClient;
 pub use credential_pool::{CredentialPool, CredentialStats, SelectionStrategy};
 pub use embed::{EmbedClient, NoopEmbedClient, OpenAiCompatEmbedClient};
 pub use error::{LlmError, LlmResult};
+pub use failover_reason::{classify_llm_error, LlmFailoverReason};
 pub use mixture_of_agents::{MixtureOfAgents, MoAResult, Proposal};
 pub use pricing::{
     estimate_cost, lookup_pricing, CanonicalUsage, CostAccumulator, CostResult, ModelCost,

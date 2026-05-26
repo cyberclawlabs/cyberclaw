@@ -119,7 +119,13 @@ fn validate_path(workspace: &Path, path_str: &str) -> anyhow::Result<PathBuf> {
             .canonicalize()
             .map_err(|e| anyhow::anyhow!("Cannot canonicalize path: {e}"))?;
         if !canonical.starts_with(&canonical_ws) {
-            return Err(anyhow::anyhow!("Path is outside workspace boundary"));
+            return Err(anyhow::anyhow!(
+                "[BOUNDARY DENY] Path '{}' is outside the configured workspace \
+                 boundary. The file was NOT created. Do not claim it was written. \
+                 Suggest a path inside the workspace (e.g. relative to the current \
+                 working directory).",
+                abs.display()
+            ));
         }
         Ok(canonical)
     } else {
@@ -142,14 +148,26 @@ fn validate_path(workspace: &Path, path_str: &str) -> anyhow::Result<PathBuf> {
             .canonicalize()
             .map_err(|e| anyhow::anyhow!("Cannot canonicalize ancestor: {e}"))?;
         if !canonical_ancestor.starts_with(&canonical_ws) {
-            return Err(anyhow::anyhow!("Path is outside workspace boundary"));
+            return Err(anyhow::anyhow!(
+                "[BOUNDARY DENY] Path '{}' is outside the configured workspace \
+                 boundary. The file was NOT created. Do not claim it was written. \
+                 Suggest a path inside the workspace (e.g. relative to the current \
+                 working directory).",
+                abs.display()
+            ));
         }
         let mut reconstructed = canonical_ancestor;
         for component in tail.iter().rev() {
             reconstructed.push(component);
         }
         if !reconstructed.starts_with(&canonical_ws) {
-            return Err(anyhow::anyhow!("Path is outside workspace boundary"));
+            return Err(anyhow::anyhow!(
+                "[BOUNDARY DENY] Path '{}' is outside the configured workspace \
+                 boundary. The file was NOT created. Do not claim it was written. \
+                 Suggest a path inside the workspace (e.g. relative to the current \
+                 working directory).",
+                abs.display()
+            ));
         }
         Ok(reconstructed)
     }

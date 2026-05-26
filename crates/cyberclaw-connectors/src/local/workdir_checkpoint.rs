@@ -117,6 +117,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["workdir"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -140,6 +141,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["workdir"]
                 })),
                 exposure: FacadeExposure::LlmDefault,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -165,6 +167,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["workdir", "hash_a"]
                 })),
                 exposure: FacadeExposure::Internal,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),
@@ -191,6 +194,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                     "required": ["workdir", "hash"]
                 })),
                 exposure: FacadeExposure::Internal,
+                workspace_root: None,
             },
             ToolsetCategory::FileSystem,
         ),

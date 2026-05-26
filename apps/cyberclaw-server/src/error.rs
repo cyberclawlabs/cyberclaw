@@ -37,6 +37,12 @@ pub enum ApiError {
     /// 典型场景：feature-gated connector 未启用、依赖的外部服务未配置。
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
+
+    /// v1.3 WP-1 — request conflicts with current state (HTTP 409).
+    /// Typical scenario: per-session concurrency guard rejects a second
+    /// in-flight request against the same `conversation_id`.
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 /// 错误响应格式
@@ -70,6 +76,7 @@ impl IntoResponse for ApiError {
             ApiError::ServiceUnavailable(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
             }
+            ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
         };
 
         // P2-4 fix: sanitize InternalError messages to avoid leaking

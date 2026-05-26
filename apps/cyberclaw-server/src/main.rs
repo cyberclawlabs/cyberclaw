@@ -897,6 +897,30 @@ async fn main() -> Result<()> {
     cyberclaw_server::memory_cleanup::spawn_memory_cleanup_from_env(state.memory_store.clone());
     info!("✓ Memory cleanup job started");
 
+    // v1.3 WP-1 — Session eviction background task.
+    // Sweeps idle conversations every 60 s; threshold controlled by
+    // CYBERCLAW_SESSION_IDLE_TIMEOUT_SECS (default 1800 = 30 min).
+    {
+        let session_store = state.conversation_session_store.clone();
+        tokio::spawn(async move {
+            let idle_secs = std::env::var("CYBERCLAW_SESSION_IDLE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(1800);
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                let evicted = session_store
+                    .evict_idle(std::time::Duration::from_secs(idle_secs))
+                    .await;
+                if evicted > 0 {
+                    tracing::info!(evicted, "session eviction sweep: removed idle sessions");
+                }
+            }
+        });
+        info!("✓ Session eviction task started (idle_timeout=CYBERCLAW_SESSION_IDLE_TIMEOUT_SECS)");
+    }
+
     // Sprint 20 W1 — RB-11 audit archive task. Hourly VACUUM INTO +
     // verify_chain + optional GPG sign + 30d retention sweep. Disable
     // by setting CYBERCLAW_AUDIT_ARCHIVE_INTERVAL_SECS=0 in production

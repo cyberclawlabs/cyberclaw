@@ -56,6 +56,7 @@ fn make_facade(
         read_only,
         destructive,
         exposure: FacadeExposure::LlmDefault,
+        workspace_root: None,
     }
 }
 

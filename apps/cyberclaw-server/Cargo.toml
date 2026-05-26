@@ -92,6 +92,7 @@ cyberclaw-plugin-runtime.workspace = true
 cyberclaw-consensus.workspace = true
 cyberclaw-store.workspace = true
 cyberclaw-workflow.workspace = true
+cyberclaw-wire.workspace = true
 tonic = "0.11"
 
 # Async traits
@@ -100,6 +101,9 @@ async-trait.workspace = true
 # 2026-05-17 (v1.2.9): atomic file write for tools_overrides persistence
 # (NamedTempFile + persist guarantees readers never see a half-written file).
 tempfile = "3"
+
+# v1.3 WP-1 — process-global session busy registry in chat_handler_v2
+once_cell.workspace = true
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }

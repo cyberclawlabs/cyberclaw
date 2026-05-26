@@ -106,6 +106,7 @@ impl AutopilotLoopConfig {
             // 推进时 system prompt 可能因 stuck/strategy 切换而变。
             // 上层若需开启可显式置 true。
             cache_system_prompt: false,
+            per_tool_max_calls: 4,
         }
     }
 }
@@ -190,6 +191,13 @@ impl AutopilotLoopBridge {
                     warn!(
                         "AgenticLoop stuck during autopilot execute step: {}",
                         reason
+                    );
+                    break;
+                }
+                IterationResult::ToolLimitReached(name) => {
+                    warn!(
+                        "AgenticLoop tool call limit reached during autopilot execute step: {}",
+                        name
                     );
                     break;
                 }

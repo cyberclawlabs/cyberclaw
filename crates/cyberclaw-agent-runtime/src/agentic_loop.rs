@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,8 +22,7 @@ use cyberclaw_llm::client::LlmClient;
 use cyberclaw_llm::rate_limit_tracker::RateLimitSnapshot;
 use cyberclaw_llm::types::{ChatRequest, Message, Role, ToolCall, ToolDefinition};
 
-use crate::loop_governor::{AgenticLoopGovernor, LoopCtx, LoopDecision, LoopProfile};
-use crate::streaming::{StreamEvent, StreamSink};
+use crate::loop_governor::{AgenticLoopGovernor, LoopCtx, LoopDecision};
 use crate::verify::{VerificationDirective, VerifierChain, VerifyCtx};
 
 // ---------------------------------------------------------------------------
@@ -51,6 +50,51 @@ impl Default for IterationBudget {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ToolOutcomeLedger — Phase 1 of LLM output reliability architecture
+// (docs/implementation/release/llm-output-reliability-architecture-2026-05-25.md)
+// ---------------------------------------------------------------------------
+
+/// Outcome status for a single tool call, derived by inspecting the tool
+/// result content for known error markers.
+///
+/// Used by [`ToolOutcomeEntry`] and consumed by `ToolFactVerifier` in
+/// `verify.rs` to detect "the model claimed success but the tool was
+/// denied / errored" hallucinations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolStatus {
+    /// Tool ran and returned a plausibly successful result (no error markers).
+    Ok,
+    /// Tool was blocked by a governance / boundary / permission policy.
+    Denied,
+    /// Tool returned an error payload (`{"error": ...}`, "failed", etc.).
+    Error,
+}
+
+/// Ledger entry recording the outcome of a single tool call.
+///
+/// Populated at `add_tool_result()` time. `target_resource` is best-effort
+/// extracted from the original tool arguments (file path, URL, command target)
+/// so the verifier can cross-reference response text against the actual target.
+#[derive(Debug, Clone)]
+pub struct ToolOutcomeEntry {
+    /// LLM-side tool name (e.g. `fs.write`, `cmd.run`, `web.fetch`).
+    pub tool_name: String,
+    /// Canonical capability identifier when known; empty string when the
+    /// dispatch site didn't map the tool to a capability (e.g. builtin
+    /// `agent.delegate`, `skill_search`).
+    pub capability_id: String,
+    /// Outcome classification derived from the result content.
+    pub status: ToolStatus,
+    /// First error marker substring detected in the result (e.g.
+    /// `[BOUNDARY DENY]`, `[GOVERNANCE DENY]`). `None` for `Ok` entries.
+    pub error_marker: Option<String>,
+    /// Best-effort extraction of the resource the tool was operating on
+    /// (file path, URL, command target). `None` when args could not be
+    /// parsed or no known field matched.
+    pub target_resource: Option<String>,
+}
+
 /// Configuration for the agentic loop.
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
@@ -62,6 +106,12 @@ pub struct LoopConfig {
     pub budget: IterationBudget,
     /// Stuck detector threshold (default: 3 consecutive identical tool calls).
     pub stuck_threshold: u32,
+    /// Maximum calls allowed for any single tool name across the session
+    /// (default: 4). When a tool is called more than this many times the
+    /// loop injects a synthetic "all attempts exhausted" tool result and
+    /// returns `IterationResult::ToolLimitReached` so the outer runner
+    /// can surface a clear error instead of burning the token budget.
+    pub per_tool_max_calls: u32,
     /// Tools the agent may call. Forwarded into every `ChatRequest` so
     /// the LLM sees a tool palette and can emit `tool_calls` instead of
     /// describing the call in plain text. Empty list disables tool use.
@@ -80,6 +130,7 @@ impl Default for LoopConfig {
             model: "gpt-4".to_string(),
             budget: IterationBudget::default(),
             stuck_threshold: 3,
+            per_tool_max_calls: 4,
             tools: Vec::new(),
             cache_system_prompt: false,
         }
@@ -125,6 +176,9 @@ pub enum IterationResult {
     Done(String),
     /// The stuck detector fired.
     Stuck(String),
+    /// A single tool exceeded `per_tool_max_calls`. The string names the
+    /// tool and the cap so operators can identify runaway retry loops.
+    ToolLimitReached(String),
     /// The iteration budget has been exhausted. The string carries a
     /// human-readable reason (BT-30): which budget triggered the exit
     /// and the actual usage vs. limit (e.g. "iteration budget 90/90
@@ -310,6 +364,11 @@ pub struct DefaultAgenticLoop {
     config: LoopConfig,
     state: LoopState,
     stuck_detector: StuckDetector,
+    /// Per-tool call counter (BUG-R10-02). Keyed by tool name; reset on
+    /// `init()`. Counts every dispatch (success and failure alike) so a
+    /// web-search tool that changes query strings each time still trips
+    /// the cap and prevents runaway token burn.
+    tool_call_counts: HashMap<String, u32>,
     initialized: bool,
     memory: Option<crate::memory_integration::MemoryIntegration>,
     /// Sprint 44+1 — skill bindings active for this loop instance.
@@ -353,11 +412,18 @@ pub struct DefaultAgenticLoop {
     /// pathological loops (stuck_detector covers repeated identical
     /// behavior beyond that).
     empty_completion_nudged: bool,
-    /// BUG-R8-01 — optional stream sink for emitting `StreamEvent::BudgetUpgraded`
-    /// SSE frames when a dynamic budget tier promotion fires. When `None`,
-    /// the upgrade is still performed and logged via `tracing::info!` but
-    /// no SSE frame is emitted.
-    sink: Option<std::sync::Arc<dyn StreamSink>>,
+    /// Phase 1 of LLM output reliability architecture
+    /// (docs/implementation/release/llm-output-reliability-architecture-2026-05-25.md).
+    ///
+    /// Append-only ledger of tool outcomes for this loop session. Populated
+    /// by [`Self::add_tool_result_with_meta`] each time a tool result is
+    /// folded back into the conversation. `ToolFactVerifier` reads this
+    /// via [`Self::tool_outcome_ledger_arc`] to detect false success claims.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` so the verifier — which lives on a
+    /// `VerifierChain` shared across loop instances — can borrow the
+    /// ledger without an unsafe self-referential dance.
+    tool_outcome_ledger: Arc<Mutex<Vec<ToolOutcomeEntry>>>,
 }
 
 impl DefaultAgenticLoop {
@@ -369,6 +435,7 @@ impl DefaultAgenticLoop {
             config: LoopConfig::default(),
             state: LoopState::new(),
             stuck_detector: StuckDetector::new(3),
+            tool_call_counts: HashMap::new(),
             initialized: false,
             memory: None,
             active_skill_bindings: Vec::new(),
@@ -378,16 +445,8 @@ impl DefaultAgenticLoop {
             last_user_prompt: String::new(),
             verifier_retry_used: false,
             empty_completion_nudged: false,
-            sink: None,
+            tool_outcome_ledger: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    /// BUG-R8-01 — install a [`StreamSink`] to receive `BudgetUpgraded` SSE
-    /// frames when a dynamic budget tier promotion fires. Calling this is
-    /// optional; without it, upgrades are still logged via `tracing::info!`.
-    pub fn with_sink(mut self, sink: std::sync::Arc<dyn StreamSink>) -> Self {
-        self.sink = Some(sink);
-        self
     }
 
     /// US-103b — install an [`AgenticLoopGovernor`] on this loop.
@@ -398,13 +457,6 @@ impl DefaultAgenticLoop {
     pub fn with_governor(mut self, governor: AgenticLoopGovernor) -> Self {
         self.governor = Some(governor);
         self
-    }
-
-    /// US-103b — convenience: install a governor built from a
-    /// [`LoopProfile`] preset. `L1` for short prompts, `L2` for
-    /// medium, `L3` for complex multi-turn.
-    pub fn with_loop_profile(self, profile: LoopProfile) -> Self {
-        self.with_governor(AgenticLoopGovernor::from_profile(profile))
     }
 
     /// US-103b — install a [`VerifierChain`] on this loop. The chain
@@ -573,10 +625,75 @@ impl DefaultAgenticLoop {
     }
 
     /// Append a tool result message to the conversation.
+    ///
+    /// Back-compat wrapper. New call sites should prefer
+    /// [`Self::add_tool_result_with_meta`] so the
+    /// [`ToolOutcomeLedger`](ToolOutcomeEntry) gets populated and
+    /// `ToolFactVerifier` can cross-reference response claims against
+    /// real outcomes.
     pub fn add_tool_result(&mut self, tool_call_id: String, content: impl Into<String>) {
         self.state
             .messages
             .push(Message::tool(tool_call_id, content));
+    }
+
+    /// Append a tool result message AND record an outcome ledger entry.
+    ///
+    /// Phase 1 of the LLM output reliability architecture
+    /// (docs/implementation/release/llm-output-reliability-architecture-2026-05-25.md).
+    ///
+    /// Parses `content` for known error markers (`[BOUNDARY DENY]`,
+    /// `[GOVERNANCE DENY]`, JSON `{"error": …}`, `"failed"`) to classify
+    /// the outcome, and best-effort extracts a `target_resource` from
+    /// `args_json` (typical keys: `path`, `url`, `command`).
+    pub fn add_tool_result_with_meta(
+        &mut self,
+        tool_call_id: String,
+        content: impl Into<String>,
+        tool_name: &str,
+        capability_id: &str,
+        args_json: Option<&str>,
+    ) {
+        let content_str = content.into();
+
+        // Classify the outcome from the result content. Conservative
+        // detection — only obvious markers count as Denied/Error.
+        let (status, error_marker) = classify_tool_outcome(&content_str);
+
+        // Best-effort target extraction from the original args JSON.
+        let target_resource = args_json.and_then(extract_target_resource);
+
+        self.tool_outcome_ledger
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(ToolOutcomeEntry {
+                tool_name: tool_name.to_string(),
+                capability_id: capability_id.to_string(),
+                status,
+                error_marker,
+                target_resource,
+            });
+
+        self.state
+            .messages
+            .push(Message::tool(tool_call_id, content_str));
+    }
+
+    /// Snapshot the current ledger contents. Returned `Vec` is a clone;
+    /// the underlying ledger continues to grow as more tool results are
+    /// added.
+    pub fn ledger_snapshot(&self) -> Vec<ToolOutcomeEntry> {
+        self.tool_outcome_ledger
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Get a shared handle to the ledger so a `ToolFactVerifier` (or
+    /// any other consumer) can read entries without going through the
+    /// loop instance. Cheap clone (`Arc::clone`).
+    pub fn tool_outcome_ledger_arc(&self) -> Arc<Mutex<Vec<ToolOutcomeEntry>>> {
+        Arc::clone(&self.tool_outcome_ledger)
     }
 
     /// Inject a synthetic system-role nudge into the conversation. Used by
@@ -631,13 +748,92 @@ impl DefaultAgenticLoop {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ToolOutcomeLedger helpers (Phase 1)
+// ---------------------------------------------------------------------------
+
+/// Classify a tool result body into a [`ToolStatus`] + optional marker.
+///
+/// Conservative — only obvious markers trip Denied/Error so false positives
+/// stay rare (the verifier downstream prefers precision over recall).
+pub(crate) fn classify_tool_outcome(content: &str) -> (ToolStatus, Option<String>) {
+    // Boundary / governance deny markers are the strongest signal — they
+    // are emitted verbatim by the server-side dispatch path.
+    const DENY_MARKERS: &[&str] = &[
+        "[BOUNDARY DENY]",
+        "[GOVERNANCE DENY",
+        "governance denied",
+        "Boundary deny",
+    ];
+    for marker in DENY_MARKERS {
+        if content.contains(marker) {
+            return (ToolStatus::Denied, Some((*marker).to_string()));
+        }
+    }
+
+    // JSON `{"error": …}` envelopes — common pattern for connector failures.
+    if content.contains("\"error\":") || content.contains("\"error\" :") {
+        return (ToolStatus::Error, Some("\"error\":".to_string()));
+    }
+
+    // Plain-text "failed" keyword inside a non-empty result. Cheap but
+    // narrow — only triggers when the substring is present.
+    let lower = content.to_lowercase();
+    if lower.contains("failed") || lower.contains("error:") {
+        return (ToolStatus::Error, Some("failed/error".to_string()));
+    }
+
+    (ToolStatus::Ok, None)
+}
+
+/// Best-effort extraction of a tool's target resource (file path, URL,
+/// command) from its arguments JSON. Returns `None` when nothing
+/// recognisable is found.
+///
+/// Recognised keys (first hit wins): `path`, `file_path`, `target_path`,
+/// `url`, `command`. For `command`, the substring before the first
+/// shell redirect (`>`, `|`, `&&`) is returned so the verifier compares
+/// the program/argv part rather than the redirect chain.
+pub(crate) fn extract_target_resource(args_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(args_json).ok()?;
+    let obj = value.as_object()?;
+
+    for key in &["path", "file_path", "target_path", "url"] {
+        if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    if let Some(cmd) = obj.get("command").and_then(|v| v.as_str()) {
+        if !cmd.is_empty() {
+            let head = cmd
+                .split(['>', '|', '&'])
+                .next()
+                .unwrap_or(cmd)
+                .trim()
+                .to_string();
+            if !head.is_empty() {
+                return Some(head);
+            }
+        }
+    }
+    None
+}
+
 #[async_trait]
 impl AgenticLoop for DefaultAgenticLoop {
     async fn init(&mut self, config: LoopConfig) -> anyhow::Result<()> {
         self.stuck_detector = StuckDetector::new(config.stuck_threshold);
+        self.tool_call_counts = HashMap::new();
         self.config = config;
         self.state = LoopState::new();
         self.initialized = true;
+        // Phase 1 — reset the tool outcome ledger for the new session.
+        self.tool_outcome_ledger
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
 
         // Inject system prompt as the first message.
         if !self.config.system_prompt.is_empty() {
@@ -707,23 +903,7 @@ impl AgenticLoop for DefaultAgenticLoop {
                     );
                     self.state.messages = compressed.messages;
                 }
-                LoopDecision::Continue { upgrade } => {
-                    // BUG-R8-01 — if a budget tier upgrade fired, emit an SSE
-                    // frame to the sink (if installed). The tracing::info! log
-                    // is emitted inside try_upgrade() regardless of sink.
-                    if let Some(ev) = upgrade {
-                        if let Some(ref sink) = self.sink {
-                            let stream_event = StreamEvent::BudgetUpgraded {
-                                from_profile: format!("{:?}", ev.from),
-                                to_profile: format!("{:?}", ev.to),
-                                new_token_ceiling: ev.new_ceiling,
-                            };
-                            // Best-effort: ignore send errors (sink may be
-                            // closed if the client disconnected).
-                            let _ = sink.send(stream_event).await;
-                        }
-                    }
-                }
+                LoopDecision::Continue => {}
             }
         }
 
@@ -799,6 +979,30 @@ impl AgenticLoop for DefaultAgenticLoop {
                         "Detected {} consecutive identical tool calls",
                         self.config.stuck_threshold
                     )));
+                }
+
+                // Per-tool call cap (BUG-R10-02): increment counters for
+                // every tool name in this batch and check against the cap.
+                // Counts unconditionally (success + failure) so a web-search
+                // tool that varies its query string each time still trips.
+                let cap = self.config.per_tool_max_calls;
+                for tc in tool_calls.iter() {
+                    let count = self
+                        .tool_call_counts
+                        .entry(tc.function.name.clone())
+                        .or_insert(0);
+                    *count += 1;
+                    if *count > cap {
+                        tracing::warn!(
+                            tool = %tc.function.name,
+                            count = count,
+                            cap = cap,
+                            "agentic_loop: per_tool_max_calls exceeded — ToolLimitReached"
+                        );
+                        return Ok(IterationResult::ToolLimitReached(
+                            tc.function.name.clone(),
+                        ));
+                    }
                 }
 
                 // Record the assistant message with tool calls.
@@ -1842,7 +2046,7 @@ mod tests {
     /// (`RegexAssertVerifier` rejects first Done, accepts second).
     #[tokio::test]
     async fn us103b_skill_governor_verifier_stitched_end_to_end() {
-        use crate::loop_governor::{AgenticLoopGovernor, LoopProfile};
+        use crate::loop_governor::{AgenticLoopGovernor, GovernorConfig};
         use crate::verify::{RegexAssertVerifier, VerifierChain, VerifyCtx};
         use std::fs;
 
@@ -1870,9 +2074,9 @@ mod tests {
             RegexAssertVerifier::new().with_patterns(["multisig".to_string()]),
         )));
 
-        // 4) Build governor with generous budgets so it does NOT trip — we
-        //    only want to confirm it observes the iterations.
-        let governor = AgenticLoopGovernor::from_profile(LoopProfile::L3);
+        // 4) Build governor with generous default budgets so it does NOT
+        //    trip — we only want to confirm it observes the iterations.
+        let governor = AgenticLoopGovernor::new(GovernorConfig::default());
 
         let mut loop_ = DefaultAgenticLoop::new(llm, gw)
             .with_governor(governor)
@@ -1934,5 +2138,97 @@ mod tests {
             loop_.verifier_retry_used,
             "verifier retry should have fired exactly once"
         );
+    }
+
+    // -- BUG-R10-02: per_tool_max_calls tests --------------------------------
+
+    /// Simulate 5 calls to the same tool (varying args each time so
+    /// StuckDetector does NOT fire) with cap=4.
+    /// The 5th dispatch must return ToolLimitReached with the tool name in
+    /// the message; the 4th is still below cap and returns ToolCalls normally.
+    #[tokio::test]
+    async fn test_per_tool_max_calls_triggers_synthetic_result() {
+        // 5 tool-call responses with varying args — mimics web search with
+        // different query strings each time (StuckDetector won't trip because
+        // signatures differ; only per_tool_max_calls cap should fire).
+        let responses: Vec<_> = (0..5)
+            .map(|i| {
+                MockLlm::make_tool_call_response(vec![make_tool_call(
+                    "web.search",
+                    &format!(r#"{{"q":"query number {i}"}}"#),
+                )])
+            })
+            .collect();
+
+        let llm = Arc::new(MockLlm::new(responses));
+        let gw = Arc::new(MockGateway);
+        let mut loop_ = DefaultAgenticLoop::new(llm, gw);
+
+        loop_
+            .init(LoopConfig {
+                per_tool_max_calls: 4,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        loop_.add_user_message("search something");
+
+        // Iterations 1–4: tool calls go through normally.
+        for i in 1..=4 {
+            let r = loop_.next_iteration().await.unwrap();
+            assert!(
+                matches!(r, IterationResult::ToolCalls(_)),
+                "iter {i}: expected ToolCalls, got {r:?}"
+            );
+            loop_.add_tool_result(format!("call_web.search_{i}"), "some result");
+        }
+
+        // Iteration 5: cap exceeded → ToolLimitReached.
+        let r5 = loop_.next_iteration().await.unwrap();
+        match r5 {
+            IterationResult::ToolLimitReached(tool_name) => {
+                assert!(
+                    tool_name.contains("web.search"),
+                    "ToolLimitReached must carry the tool name: {tool_name}"
+                );
+            }
+            other => panic!("iter 5: expected ToolLimitReached, got {other:?}"),
+        }
+    }
+
+    /// 3 calls to the same tool with cap=4: all must pass through normally.
+    /// Args vary per call so StuckDetector (name+args hash) doesn't interfere.
+    #[tokio::test]
+    async fn test_per_tool_max_calls_does_not_trigger_below_threshold() {
+        let responses: Vec<_> = (0..3)
+            .map(|i| {
+                MockLlm::make_tool_call_response(vec![make_tool_call(
+                    "cmd.exec",
+                    &format!(r#"{{"cmd":"ls /dir{i}"}}"#),
+                )])
+            })
+            .collect();
+
+        let llm = Arc::new(MockLlm::new(responses));
+        let gw = Arc::new(MockGateway);
+        let mut loop_ = DefaultAgenticLoop::new(llm, gw);
+
+        loop_
+            .init(LoopConfig {
+                per_tool_max_calls: 4,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        loop_.add_user_message("run ls three times");
+
+        for i in 1..=3 {
+            let r = loop_.next_iteration().await.unwrap();
+            assert!(
+                matches!(r, IterationResult::ToolCalls(_)),
+                "iter {i}: expected ToolCalls (below cap), got {r:?}"
+            );
+            loop_.add_tool_result(format!("call_cmd.exec_{i}"), "file1\nfile2");
+        }
     }
 }

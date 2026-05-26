@@ -5,6 +5,36 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) fo
 
 ---
 
+## [v1.3.0] — 2026-05-26
+
+Major architectural rework. v1.3.0 ships 4 work packages plus a new LLM hallucination defense layer, addressing the root causes of issues that v1.2.x patches could only suppress.
+
+### What's new for users
+
+- **Conversation sessions are now server-side.** Submit a message, get back an `X-Conversation-Id` header, send the same ID on the next turn — the server holds the full conversation including tool call structure. No more lost context across turns. New endpoint `POST /v2/agent/chat/completions`; legacy `/v1/agent/chat/completions` retained for backward compatibility.
+- **Single-tier budget**. Removed the L1/L2/L3 profile tiers. Every request gets a generous 128k token / 300s wall-clock ceiling. The agentic loop self-stops when done. No more `[budget exhausted]` errors on simple prompts.
+- **Typed SSE protocol** (new `cyberclaw-wire` crate). All server→client frames now carry a `{"v":1, "type":"...", "data":{...}}` envelope. New frame types: `Heartbeat` (every 15s — no more stuck spinners), `ToolStart`/`ToolComplete` (TUI now shows `[tool: X ✓ Nms]` inline), typed `Error` with `ErrorKind::{Billing, RateLimit, AuthInvalid, ContextOverflow, ...}` for colored TUI rendering.
+- **Hallucination defense (`ToolFactVerifier`)**. New verifier in the agentic loop's verifier chain detects when the LLM claims success for tool operations that actually failed or were never called. Default-on; rollback via `CYBERCLAW_TOOL_FACT_VERIFICATION=off`. Specifically catches: "Done. Written to /tmp/X" when /tmp write was denied, "File saved to PATH" when no tool ever wrote to PATH. Forces a one-shot retry with corrective feedback.
+- **Stronger credential governance.** `fs.write` / `fs.edit` / `cmd.run` (and bash redirect via `cmd.run`) now block writes containing credential patterns (AWS access keys, API keys, `password=`, `secret=`, GitHub tokens, etc.) with a clear `[GOVERNANCE DENY — D010]` user-facing message.
+- **Workspace boundary errors are now anti-hallucination**. When a write is blocked by workspace boundary, the error message contains `[BOUNDARY DENY] ... The file was NOT created. Do not claim it was written.` — helps the LLM tell the user honestly.
+- **TUI improvements** — Esc no longer accidentally exits the TUI (now clears input; exit via Ctrl-C); banner shows app version + model + conversation ID; PgUp/PgDn scroll conversation history; ratatui status bar shows heartbeat elapsed seconds; assistant timestamps reflect reply-complete time in local timezone.
+
+### Migration
+
+- **CLI users**: no action — `cyberclaw chat` auto-uses v2 endpoint and handles new conversation IDs.
+- **External v1 API consumers**: continue to work unchanged. v1 endpoint preserved; deprecate in v1.4.
+- **Self-hosted deployments**: set `TZ` env var to your timezone if you want server-side timestamps in local time (currently UTC by default — known limitation, fixed properly in v1.3.1).
+- **Credential workflow**: if your workflow legitimately needs to write credentials to disk (e.g., automated key rotation), use the existing approval queue (`cyberclaw review approve <id>`) to override the D010 gate per-call.
+
+### Notes
+
+- All 4 architectural debt classes from prior v1.2.x patches now have structural fixes
+- 86 commits since v1.2.19, 4056+ workspace tests passing
+- Comprehensive QA: 13 rounds (R10-R24) of side-by-side comparison vs reference agent platform
+- Zero breaking changes for v1 endpoint consumers
+
+---
+
 ## [v1.2.19] — 2026-05-23
 
 TUI bug-fix sprint. Patch release closing 16 user-facing bugs surfaced by 9 rounds of real-LLM end-to-end testing. Zero new features; pure stability + UX. Recommended upgrade for all users.

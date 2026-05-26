@@ -3,8 +3,47 @@
 //! Provides [`DangerousCapabilityFilter`] which checks capability identifiers
 //! against a set of [`DangerousRule`]s and returns a [`FilterDecision`]
 //! indicating whether the capability should be allowed, warned, or denied.
+//!
+//! R13-BUG-01: also provides [`DangerousCapabilityFilter::check_write_content`]
+//! which performs input-side credential detection for `fs.write` operations
+//! before they reach the connector layer.
 
+use regex::Regex;
 use tracing::warn;
+
+// ---------------------------------------------------------------------------
+// Credential pattern constants reused from tool_output_sanitizer
+// ---------------------------------------------------------------------------
+
+/// Input-side credential patterns checked before any `fs.write` is dispatched.
+///
+/// Each entry is `(name, regex_source)`.  Patterns match common credential
+/// formats that must never be written to disk by an autonomous agent.
+static WRITE_CREDENTIAL_PATTERNS: &[(&str, &str)] = &[
+    // AWS access key ID — always starts with AKIA followed by 16 uppercase alphanumerics.
+    ("aws_access_key_id", r"AKIA[0-9A-Z]{16}"),
+    // Bare key-value forms used in config files / .env (case-insensitive label).
+    (
+        "aws_credential_field",
+        r"(?i)(aws_access_key_id|aws_secret_access_key)\s*[=:]",
+    ),
+    // Generic credential field names that indicate secret content.
+    (
+        "generic_credential_field",
+        r"(?i)(api_key|apikey|secret_key|secret|password|passwd|token)\s*[=:]",
+    ),
+    // GitHub personal-access / oauth / server / refresh / user tokens.
+    ("github_token", r"gh[pousr]_[A-Za-z0-9_]{36,}"),
+    // Anthropic API key.
+    ("anthropic_api_key", r"sk-ant-[A-Za-z0-9_\-]{20,}"),
+    // OpenAI / generic sk- keys.
+    ("openai_api_key", r"sk-[A-Za-z0-9]{20,}"),
+    // PEM private-key header.
+    (
+        "pem_private_key",
+        r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----",
+    ),
+];
 
 /// Severity level of a dangerous capability rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +225,59 @@ impl DangerousCapabilityFilter {
         self.exceptions.push(exception);
     }
 
+    /// Check whether writing `content` via `capability_id` is safe.
+    ///
+    /// This is the **input-side** credential check performed before any
+    /// `fs.write` (or similar write-to-disk) capability is dispatched.
+    /// It is independent of the capability-pattern rules checked by [`check`].
+    ///
+    /// Returns [`FilterDecision::Deny`] (Critical) if `content` contains
+    /// a credential pattern.  Returns [`FilterDecision::Allow`] otherwise.
+    ///
+    /// The caller should still invoke [`check`] on the capability identifier
+    /// itself — this method only inspects the write payload.
+    ///
+    /// # R13-BUG-01
+    ///
+    /// QA R13 TC3: agent wrote `aws-credentials.txt` (116 bytes) containing
+    /// AWS credentials without any governance interception.  Adding this
+    /// pre-dispatch content scan closes that gap for all `fs.write` paths.
+    pub fn check_write_content(&self, capability_id: &str, content: &str) -> FilterDecision {
+        // Only inspect write capabilities (and shell execution paths that can
+        // write credentials to disk via redirect — R13-BUG-01 extension, QA R15).
+        let cap_lower = capability_id.to_lowercase();
+        if !cap_lower.contains("fs.write")
+            && !cap_lower.contains("file.write")
+            && !cap_lower.contains("write_file")
+            && !cap_lower.contains("cmd.run")
+        {
+            return FilterDecision::Allow;
+        }
+
+        for (name, pattern_src) in WRITE_CREDENTIAL_PATTERNS {
+            let re = match Regex::new(pattern_src) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if re.is_match(content) {
+                warn!(
+                    capability = %capability_id,
+                    pattern = %name,
+                    "check_write_content: credential pattern detected in fs.write content — DENY"
+                );
+                return FilterDecision::Deny {
+                    rule_id: "D010".to_string(),
+                    severity: DangerSeverity::Critical,
+                    reason: format!(
+                        "writing credential-pattern content blocked by policy (matched: {})",
+                        name
+                    ),
+                };
+            }
+        }
+        FilterDecision::Allow
+    }
+
     /// Check whether `capability_id` is permitted, warned, or denied.
     ///
     /// Rules are evaluated in insertion order. The first matching rule
@@ -314,6 +406,31 @@ mod tests {
     fn test_default_rules_count() {
         let filter = DangerousCapabilityFilter::with_defaults();
         assert_eq!(filter.rules.len(), 9, "should have exactly 9 default rules");
+    }
+
+    // R13-BUG-01: input-side credential detection for fs.write
+    #[test]
+    fn test_fs_write_aws_access_key_blocked() {
+        let filter = DangerousCapabilityFilter::with_defaults();
+        let content = "aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n";
+        match filter.check_write_content("connector:local:fs.write", content) {
+            FilterDecision::Deny { rule_id, severity, reason } => {
+                assert_eq!(rule_id, "D010");
+                assert_eq!(severity, DangerSeverity::Critical);
+                assert!(reason.contains("credential-pattern"), "reason: {reason}");
+            }
+            other => panic!("expected Deny for AWS credential content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_fs_write_non_credential_allowed() {
+        let filter = DangerousCapabilityFilter::with_defaults();
+        let content = "hello world\nThis is a plain text file with no secrets.\n";
+        match filter.check_write_content("connector:local:fs.write", content) {
+            FilterDecision::Allow => {}
+            other => panic!("expected Allow for non-credential content, got {:?}", other),
+        }
     }
 
     /// D1 follow-up (2026-05-12): D009 must explicitly cover `fs.delete`.

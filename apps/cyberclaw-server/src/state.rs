@@ -521,6 +521,15 @@ pub struct AppState {
 
     /// User profile store — in-memory + file backup at `~/.cyberclaw/profiles.toml`.
     pub profile_store: Arc<ProfileStore>,
+
+    /// v1.3 WP-1 — server-side conversation session store.
+    ///
+    /// Backs `POST /v2/agent/chat/completions`. Holds the authoritative
+    /// per-conversation message history (typed `cyberclaw_llm::types::Message`,
+    /// tool_calls preserved) so clients only send the new turn's user message
+    /// rather than a `messages` array. Eliminates R7-01 / R9-01 / R9-02
+    /// context-loss failure modes.
+    pub conversation_session_store: Arc<dyn cyberclaw_store::SessionStore>,
 }
 
 /// SkillIndex adapter wrapping the workspace's `Arc<RwLock<SkillHub>>`.
@@ -1245,6 +1254,11 @@ impl AppState {
             usage: Arc::new(crate::usage::UsageCounters::new()),
             cron_store: crate::cron::CronStore::load_default(),
             profile_store: ProfileStore::load_default(),
+            // v1.3 WP-1 — single global in-memory conversation session store.
+            // Cap defaults to InMemorySessionStore::DEFAULT_MAX_SESSIONS (1000).
+            conversation_session_store: Arc::new(
+                cyberclaw_store::InMemorySessionStore::new(),
+            ),
         }
     }
 

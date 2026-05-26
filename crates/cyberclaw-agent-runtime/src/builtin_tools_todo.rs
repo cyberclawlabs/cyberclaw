@@ -322,6 +322,7 @@ pub fn todo_read_facade() -> (CapabilityFacade, ToolsetCategory) {
         read_only: true,
         destructive: false,
         exposure: FacadeExposure::LlmDefault,
+        workspace_root: None,
     };
     (facade, ToolsetCategory::Memory)
 }
@@ -366,6 +367,7 @@ pub fn todo_write_facade() -> (CapabilityFacade, ToolsetCategory) {
         read_only: false,
         destructive: false,
         exposure: FacadeExposure::LlmDefault,
+        workspace_root: None,
     };
     (facade, ToolsetCategory::Memory)
 }

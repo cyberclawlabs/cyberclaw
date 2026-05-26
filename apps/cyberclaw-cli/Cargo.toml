@@ -16,6 +16,7 @@ cyberclaw-governance.workspace = true
 cyberclaw-observability.workspace = true
 cyberclaw-llm.workspace = true
 cyberclaw-llm-bridge.workspace = true
+cyberclaw-wire.workspace = true
 cyberclaw-server = { path = "../cyberclaw-server" }
 tokio.workspace = true
 serde.workspace = true
