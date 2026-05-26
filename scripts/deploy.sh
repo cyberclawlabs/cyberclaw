@@ -28,7 +28,8 @@ ROLLBACK_ON_FAILURE="${ROLLBACK_ON_FAILURE:-true}"
 SCP_OPTS="${SCP_OPTS:--o StrictHostKeyChecking=no}"
 
 readonly BIN_NAME="cyberclaw-server"
-readonly BUILD_DIR="/Users/max/project/cyberclaw/target/release"
+readonly REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+readonly BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/target/release}"
 readonly LOCAL_BIN="${BUILD_DIR}/${BIN_NAME}"
 readonly ARTIFACT="cyberclaw-server-$(date +%Y%m%d-%H%M%S).tar.gz"
 
@@ -74,7 +75,7 @@ log "Binary:  ${DEPLOY_PATH}"
 # ── Build ─────────────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" == "false" ]]; then
   log "Building release binary..."
-  cd /Users/max/project/cyberclaw
+  cd "$REPO_ROOT"
 
   cargo build --release -p cyberclaw-server 2>&1 | tail -5
 

@@ -30,7 +30,7 @@ Major architectural rework. v1.3.0 ships 4 work packages plus a new LLM hallucin
 
 - All 4 architectural debt classes from prior v1.2.x patches now have structural fixes
 - 86 commits since v1.2.19, 4056+ workspace tests passing
-- Comprehensive QA: 13 rounds (R10-R24) of side-by-side comparison vs reference agent platform
+- Comprehensive QA: 13 rounds of side-by-side comparison vs reference agent platform
 - Zero breaking changes for v1 endpoint consumers
 
 ---
