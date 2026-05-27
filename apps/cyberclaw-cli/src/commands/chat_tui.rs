@@ -211,7 +211,9 @@ pub enum TokenEvent {
         duration_ms: u64,
     },
     /// v1.3 WP-3: governance approval was granted.
-    ApprovalGranted { tool: String },
+    ApprovalGranted {
+        tool: String,
+    },
     /// v1.3 WP-3: governance approval was denied.
     ApprovalDenied {
         tool: String,
@@ -219,7 +221,9 @@ pub enum TokenEvent {
     },
     /// v1.3 WP-3: application-level keep-alive — Step 6 updates a status-bar
     /// `♥ Ns` indicator so users see "still alive" during slow LLM calls.
-    Heartbeat { elapsed_secs: u64 },
+    Heartbeat {
+        elapsed_secs: u64,
+    },
 }
 
 /// 审批请求上下文
@@ -1615,9 +1619,7 @@ pub async fn run_tui(
                                 // Esc 不再退出 TUI（之前误触退出 = UX bug）。
                                 // 改为清当前输入框。退出请按 Ctrl-C。
                                 let _ = app.take_input();
-                                app.status_msg = Some(
-                                    "输入已清空 · 退出请按 Ctrl-C".to_string(),
-                                );
+                                app.status_msg = Some("输入已清空 · 退出请按 Ctrl-C".to_string());
                             }
                             (KeyModifiers::CONTROL, KeyCode::Char('s'))
                             | (KeyModifiers::NONE, KeyCode::Enter) => {
@@ -1743,7 +1745,9 @@ pub async fn run_tui(
                     // v1.3 WP-1: 会话超时
                     if e == "SESSION_EXPIRED" {
                         current_conv_id = None;
-                        app.push_system("[Session expired] 会话已超时，下次消息将新建会话。".to_string());
+                        app.push_system(
+                            "[Session expired] 会话已超时，下次消息将新建会话。".to_string(),
+                        );
                         continue;
                     }
                     // BUG-CB-08: detect auth-class errors and append a helpful
@@ -1813,7 +1817,12 @@ pub async fn run_tui(
                 Ok(TokenEvent::ToolStart { tool, args: _ }) => {
                     app.push_system(format!("[tool: {tool} \u{2026}]"));
                 }
-                Ok(TokenEvent::ToolComplete { tool, ok, preview, duration_ms }) => {
+                Ok(TokenEvent::ToolComplete {
+                    tool,
+                    ok,
+                    preview,
+                    duration_ms,
+                }) => {
                     let line = if ok {
                         format!("[tool: {tool} \u{2713} {duration_ms}ms]")
                     } else {
@@ -2672,7 +2681,10 @@ fn save_history_to_file(app: &TuiApp, path: &str) -> Result<()> {
             "assistant" => "**Assistant**",
             _ => "**System**",
         };
-        let ts = block.ts.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S %Z");
+        let ts = block
+            .ts
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %Z");
         out.push_str(&format!("### {} — {}\n\n{}\n\n", role, ts, block.content));
         out.push_str("---\n\n");
     }
@@ -2758,7 +2770,11 @@ mod tests {
             app.conversation_auto_pin,
             "force must restore auto_pin=true"
         );
-        assert_eq!(app.scroll_offset, u16::MAX, "force must set offset to u16::MAX");
+        assert_eq!(
+            app.scroll_offset,
+            u16::MAX,
+            "force must set offset to u16::MAX"
+        );
     }
 
     #[test]

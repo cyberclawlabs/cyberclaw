@@ -77,9 +77,9 @@ function dict(lang: Lang) {
         name: "名称",
         schedule: "cron 表达式",
         scheduleHint: "(6 字段: 秒 分 时 日 月 周)",
-        actionType: "动作类型",
-        payload: "参数",
-        payloadPlaceholder: "消息 / URL / …",
+        actionType: "投递到",
+        payload: "提示词",
+        payloadPlaceholder: "每次运行时让 agent 做什么？…",
         enabled: "已启用",
         cancel: "取消",
         create: "创建",
@@ -121,9 +121,9 @@ function dict(lang: Lang) {
         name: "name",
         schedule: "schedule",
         scheduleHint: "(6-field cron: sec min hr dom mon dow)",
-        actionType: "action type",
-        payload: "payload",
-        payloadPlaceholder: "message / URL / …",
+        actionType: "deliver to",
+        payload: "prompt",
+        payloadPlaceholder: "What should the agent do on each run? …",
         enabled: "enabled",
         cancel: "Cancel",
         create: "Create",
@@ -219,13 +219,14 @@ function JobDialog({
         aria-modal="true"
         aria-label={isEdit ? L.dialogEditTitle : L.dialogTitle}
         tabIndex={-1}
-        className="bg-bg-2 border border-border rounded-xl p-5 w-full max-w-md space-y-3 shadow-xl outline-none"
+        className="bg-bg-2 border border-border rounded-xl p-5 w-full max-w-lg space-y-3 shadow-xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-sm font-semibold">{isEdit ? L.dialogEditTitle : L.dialogTitle}</h2>
 
         {err && <p className="text-xs text-rose-400 px-2 py-1 bg-rose-500/10 rounded">{err}</p>}
 
+        {/* v1.4 W2: hm-style prompt-first cron creation */}
         <label className="flex flex-col gap-0.5 text-xs">
           <span className="text-fg-3 font-medium uppercase tracking-wide text-[11px]">{L.name}</span>
           <input
@@ -237,40 +238,43 @@ function JobDialog({
         </label>
 
         <label className="flex flex-col gap-0.5 text-xs">
-          <span className="text-fg-3 font-medium uppercase tracking-wide text-[11px]">
-            {L.schedule}{" "}
-            <span className="text-fg-5 normal-case font-normal">{L.scheduleHint}</span>
-          </span>
-          <input
-            className="px-2 py-1.5 rounded bg-bg-3 border border-border outline-none focus-ring mono"
-            value={form.schedule}
-            onChange={(e) => set("schedule", e.target.value)}
-            placeholder="0 */5 * * * *"
-          />
-        </label>
-
-        <label className="flex flex-col gap-0.5 text-xs">
-          <span className="text-fg-3 font-medium uppercase tracking-wide text-[11px]">{L.actionType}</span>
-          <select
-            className="px-2 py-1.5 rounded bg-bg-3 border border-border outline-none focus-ring"
-            value={form.action_type}
-            onChange={(e) => set("action_type", e.target.value)}
-          >
-            <option value="echo">echo (log only)</option>
-            <option value="chat">chat (log only in v1)</option>
-            <option value="webhook">webhook (log only in v1)</option>
-          </select>
-        </label>
-
-        <label className="flex flex-col gap-0.5 text-xs">
           <span className="text-fg-3 font-medium uppercase tracking-wide text-[11px]">{L.payload}</span>
-          <input
-            className="px-2 py-1.5 rounded bg-bg-3 border border-border outline-none focus-ring"
+          <textarea
+            className="px-2 py-1.5 rounded bg-bg-3 border border-border outline-none focus-ring resize-y min-h-[88px]"
             value={form.action_payload}
             onChange={(e) => set("action_payload", e.target.value)}
             placeholder={L.payloadPlaceholder}
+            rows={4}
           />
         </label>
+
+        <div className="flex gap-3">
+          <label className="flex flex-col gap-0.5 text-xs flex-1">
+            <span className="text-fg-3 font-medium uppercase tracking-wide text-[11px]">
+              {L.schedule}{" "}
+              <span className="text-fg-5 normal-case font-normal">{L.scheduleHint}</span>
+            </span>
+            <input
+              className="px-2 py-1.5 rounded bg-bg-3 border border-border outline-none focus-ring mono"
+              value={form.schedule}
+              onChange={(e) => set("schedule", e.target.value)}
+              placeholder="0 */5 * * * *"
+            />
+          </label>
+
+          <label className="flex flex-col gap-0.5 text-xs w-[140px]">
+            <span className="text-fg-3 font-medium uppercase tracking-wide text-[11px]">{L.actionType}</span>
+            <select
+              className="px-2 py-1.5 rounded bg-bg-3 border border-border outline-none focus-ring"
+              value={form.action_type}
+              onChange={(e) => set("action_type", e.target.value)}
+            >
+              <option value="echo">Local (log)</option>
+              <option value="chat">Chat</option>
+              <option value="webhook">Webhook</option>
+            </select>
+          </label>
+        </div>
 
         <label className="flex items-center gap-2 text-xs cursor-pointer">
           <input

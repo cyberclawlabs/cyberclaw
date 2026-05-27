@@ -28,8 +28,10 @@ ROLLBACK_ON_FAILURE="${ROLLBACK_ON_FAILURE:-true}"
 SCP_OPTS="${SCP_OPTS:--o StrictHostKeyChecking=no}"
 
 readonly BIN_NAME="cyberclaw-server"
-readonly REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-readonly BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/target/release}"
+# Derive repo root from this script's location so the deploy script
+# works for any contributor / CI checkout, not a hard-coded path.
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly BUILD_DIR="${REPO_ROOT}/target/release"
 readonly LOCAL_BIN="${BUILD_DIR}/${BIN_NAME}"
 readonly ARTIFACT="cyberclaw-server-$(date +%Y%m%d-%H%M%S).tar.gz"
 

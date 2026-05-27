@@ -6,8 +6,13 @@
 //
 // The terminal mounts only when this component is rendered (lazy connect).
 // Cleanup closes the WebSocket and disposes xterm on unmount.
+//
+// v1.4 W2: migrated from deprecated `xterm`/`xterm-addon-fit` to `@xterm/*`
+// scoped packages. Added Unicode11 (CJK perf), WebGL (rendering perf), and
+// WebLinks (clickable URLs) addons — feature parity with hermes-agent/web.
 
 import { useEffect, useRef } from "react";
+// xterm.css is imported globally in main.tsx
 
 interface PtyTerminalProps {
   wsUrl: string;
@@ -26,8 +31,14 @@ export default function PtyTerminal({ wsUrl }: PtyTerminalProps) {
     let cleanup: (() => void) | undefined;
 
     void (async () => {
-      const { Terminal } = await import("xterm");
-      const { FitAddon } = await import("xterm-addon-fit");
+      const [{ Terminal }, { FitAddon }, { Unicode11Addon }, { WebLinksAddon }, { WebglAddon }] =
+        await Promise.all([
+          import("@xterm/xterm"),
+          import("@xterm/addon-fit"),
+          import("@xterm/addon-unicode11"),
+          import("@xterm/addon-web-links"),
+          import("@xterm/addon-webgl"),
+        ]);
 
       if (disposed || !containerRef.current) return;
 
@@ -42,11 +53,23 @@ export default function PtyTerminal({ wsUrl }: PtyTerminalProps) {
         },
         cursorBlink: true,
         scrollback: 1000,
+        allowProposedApi: true, // required for Unicode11Addon
       });
 
       const fit = new FitAddon();
       term.loadAddon(fit);
+      term.loadAddon(new Unicode11Addon()); // CJK / emoji width fix
+      term.unicode.activeVersion = "11";
+      term.loadAddon(new WebLinksAddon()); // clickable URLs
       term.open(containerRef.current);
+      // WebGL must be loaded AFTER open() — falls back to canvas if WebGL fails
+      try {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => webgl.dispose());
+        term.loadAddon(webgl);
+      } catch {
+        // WebGL unsupported → silent fallback to canvas renderer
+      }
       fit.fit();
 
       const ws = new WebSocket(wsUrl);

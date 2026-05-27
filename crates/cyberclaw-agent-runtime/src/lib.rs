@@ -3,12 +3,14 @@
 pub mod agentic_loop;
 pub mod builtin_tools;
 pub mod builtin_tools_todo;
+pub mod chat_verification_gate;
 pub mod clarify;
 pub mod config;
 pub mod constitution;
 pub mod context_compressor;
 pub mod deferred_registry;
 pub mod dsml_parser;
+pub mod emergence_kit;
 pub mod error;
 pub mod loop_delegate;
 pub mod loop_governor;
@@ -16,6 +18,7 @@ pub mod memory_integration;
 pub mod mock;
 pub mod prompt_assembler;
 pub mod runtime;
+pub mod session_search_injector;
 pub mod skill_binder;
 pub mod streaming;
 pub mod sub_agent;
@@ -47,9 +50,7 @@ pub use context_compressor::{
     MemoryLevel, COMPRESSION_SYSTEM_PROMPT,
 };
 
-pub use loop_governor::{
-    AgenticLoopGovernor, CostTracker, GovernorConfig, LoopCtx, LoopDecision,
-};
+pub use loop_governor::{AgenticLoopGovernor, CostTracker, GovernorConfig, LoopCtx, LoopDecision};
 
 pub use verify::{
     CodeBlockVerifier, JsonStructureVerifier, OutputVerifier, RegexAssertVerifier,

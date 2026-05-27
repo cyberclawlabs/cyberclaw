@@ -414,7 +414,11 @@ mod tests {
         let filter = DangerousCapabilityFilter::with_defaults();
         let content = "aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n";
         match filter.check_write_content("connector:local:fs.write", content) {
-            FilterDecision::Deny { rule_id, severity, reason } => {
+            FilterDecision::Deny {
+                rule_id,
+                severity,
+                reason,
+            } => {
                 assert_eq!(rule_id, "D010");
                 assert_eq!(severity, DangerSeverity::Critical);
                 assert!(reason.contains("credential-pattern"), "reason: {reason}");

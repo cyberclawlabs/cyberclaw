@@ -5,6 +5,41 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) fo
 
 ---
 
+## [v1.7.1] — 2026-05-27
+
+Reliability + observability hardening on top of v1.3.0. Sustained-load tested, release-profile tuned, additional per-turn safeguards against the most common chat-time failure modes.
+
+### What's new for users
+
+- **Per-turn response check.** The chat handler now runs a fast heuristic check on every assistant reply and emits a structured `tracing` event when one of these failure modes is detected: empty reply after a model refusal, fabrication of "tool result"-shaped content while a tool intent is still pending, first-turn A/B choice prompts for requests that already have a concrete deliverable anchor, and "saved to /tmp/X" claims with no corresponding file-write tool call. Observability only — the response is not modified — so existing integrations are unaffected.
+- **Cross-turn recall reflex.** A new rule in the agent constitution directs the model to look up prior conversation context via `memory_search` before asking the user to repeat themselves or guessing what they meant by "earlier" / "前面". Pairs with an optional `SessionSearchInjector` for operators who want passive top-k injection (off by default).
+- **Smaller release binary.** Release profile now enables fat LTO + `codegen-units=1` + `strip=true`. Binary size reduced by ~30%. Runtime performance is within noise of the previous build on macOS arm64 single-process benchmarks.
+- **Sustained-load baseline published.** New baseline numbers under continuous load on a single Apple Silicon process: 12,000,000 requests over one hour, zero failures, ~3,333 RPS average, audit chain remained verifiable end-to-end.
+
+### Quality gates
+
+- `cargo test --workspace --lib`: 4,073 pass / 0 fail / 4 ignored / 17 suites.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- WebUI Playwright suite: 95 / 95 pass.
+
+### Security
+
+- `git-secrets` pre-commit hook installed; `.gitallowed` policy file registers OpenAI / Anthropic / GitHub PAT / JWT patterns and explicit placeholders so test fixtures and example values don't trigger false positives.
+- Internal test scripts no longer carry hard-coded API keys; they now require `MINIMAX_API_KEY` (or equivalent) to be exported before running.
+
+### Migration
+
+- No API changes. v1.3.0 → v1.7.1 is a drop-in upgrade.
+- The new per-turn check is observability-only — no behavior change for existing clients.
+- The cross-session recall behavior surfaces only when (a) the user references prior context and (b) `memory_search` is available in the bound tool palette. Operators don't have to enable anything; it's an LLM-driven reflex from the constitution rule.
+
+### Notes
+
+- The optional `SessionSearchInjector` ships with a provider trait but no default backend — operators wire it explicitly to their `SkillHub` / FTS5 store if they want passive top-k context injection.
+- On macOS arm64, the `mimalloc` allocator was evaluated and reverted (the system allocator outperformed it in single-process benchmarks). The Linux story may differ; the relevant Cargo dependency lines remain commented in source for future evaluation.
+
+---
+
 ## [v1.3.0] — 2026-05-26
 
 Major architectural rework. v1.3.0 ships 4 work packages plus a new LLM hallucination defense layer, addressing the root causes of issues that v1.2.x patches could only suppress.

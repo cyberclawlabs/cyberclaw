@@ -120,9 +120,11 @@ pub fn to_sse_data(frame: &Frame) -> Result<String, EncodeError> {
             let ty = map
                 .get("type")
                 .and_then(|t| t.as_str())
-                .ok_or_else(|| EncodeError::Serde(serde::ser::Error::custom(
-                    "frame serialised without `type` tag",
-                )))?
+                .ok_or_else(|| {
+                    EncodeError::Serde(serde::ser::Error::custom(
+                        "frame serialised without `type` tag",
+                    ))
+                })?
                 .to_string();
             let data = map.get("data").cloned().unwrap_or(Value::Null);
             (ty, data)

@@ -1256,9 +1256,7 @@ impl AppState {
             profile_store: ProfileStore::load_default(),
             // v1.3 WP-1 — single global in-memory conversation session store.
             // Cap defaults to InMemorySessionStore::DEFAULT_MAX_SESSIONS (1000).
-            conversation_session_store: Arc::new(
-                cyberclaw_store::InMemorySessionStore::new(),
-            ),
+            conversation_session_store: Arc::new(cyberclaw_store::InMemorySessionStore::new()),
         }
     }
 

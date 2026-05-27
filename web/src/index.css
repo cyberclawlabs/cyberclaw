@@ -1,6 +1,7 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* v1.4 W3: Tailwind 4 single-import syntax (replaces 3 @tailwind directives) */
+@import "tailwindcss";
+@plugin "@tailwindcss/forms";
+@plugin "@tailwindcss/typography";
 
 /* === 主题（从 v1 cyberclaw.html 完整 port） === */
 :root {

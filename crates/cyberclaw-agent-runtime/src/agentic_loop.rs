@@ -999,9 +999,7 @@ impl AgenticLoop for DefaultAgenticLoop {
                             cap = cap,
                             "agentic_loop: per_tool_max_calls exceeded — ToolLimitReached"
                         );
-                        return Ok(IterationResult::ToolLimitReached(
-                            tc.function.name.clone(),
-                        ));
+                        return Ok(IterationResult::ToolLimitReached(tc.function.name.clone()));
                     }
                 }
 

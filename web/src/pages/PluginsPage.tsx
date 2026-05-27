@@ -2,6 +2,7 @@
 // ~/.cyberclaw/plugins/*/plugin.json via GET /api/v1/plugins.
 
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { type Plugin, fetchPlugins } from "@/lib/api";
 import { type Lang } from "@/lib/i18n";
 
@@ -29,6 +30,9 @@ function dict(lang: Lang) {
         enabledYes: "是",
         enabledNo: "否",
         sourceFmt: (n: number) => `来源：/api/v1/plugins。已安装 ${n} 个插件。`,
+        skillsHintTitle: "想从 GitHub 一键安装扩展？",
+        skillsHintBody: "Platform Plugin 走文件投递模式（手动放 plugin.json）。如果你想从 GitHub 仓库一键安装可扩展能力，请用",
+        skillsHintLink: "Skills 安装流程 →",
       }
     : {
         title: "Platform Plugins",
@@ -58,11 +62,15 @@ function dict(lang: Lang) {
         colDescription: "description",
         sourceFmt: (n: number) =>
           `Source: /api/v1/plugins. ${n} plugin${n !== 1 ? "s" : ""} installed.`,
+        skillsHintTitle: "Looking for one-click GitHub extensions?",
+        skillsHintBody: "Platform Plugins use a file-drop model (manual plugin.json). For installing extensions from GitHub repos in one click, use the",
+        skillsHintLink: "Skills install flow →",
       };
 }
 
 export default function PluginsPage({ lang }: { lang: Lang }) {
   const L = dict(lang);
+  const navigate = useNavigate();
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,6 +92,23 @@ export default function PluginsPage({ lang }: { lang: Lang }) {
         <h2 className="text-base font-medium">{L.title}</h2>
         <p className="text-xs text-fg-3">{L.subtitle}</p>
       </header>
+
+      {/* v1.4 W2: cross-link to Skills install flow (hm-style GitHub install lives there) */}
+      <div className="rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-xs text-fg-2 flex items-start gap-2">
+        <span className="text-accent shrink-0">ⓘ</span>
+        <div className="flex-1">
+          <div className="font-medium text-fg-2 mb-0.5">{L.skillsHintTitle}</div>
+          <div className="text-fg-3">
+            {L.skillsHintBody}{" "}
+            <button
+              className="text-accent hover:underline"
+              onClick={() => navigate("/skills")}
+            >
+              {L.skillsHintLink}
+            </button>
+          </div>
+        </div>
+      </div>
 
       {err && (
         <p className="text-xs text-rose-400 px-2 py-1.5 bg-rose-500/10 rounded">{err}</p>

@@ -814,26 +814,77 @@ async fn get_memory(
 }
 
 /// `POST /api/v1/memory` — manually create a new memory record (admin only, S19 F).
+///
+/// v1.6 WP-1 #1: accepts raw JSON Value to collect ALL missing/invalid fields in one
+/// 422 response, so clients don't iteratively discover schema via 4+ round trips
+/// (memory_smoke_v1.5 found `agent_id` then `level` then `content` step-by-step).
 async fn create_memory(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<CreateMemoryRequest>,
+    Json(raw): Json<serde_json::Value>,
 ) -> Result<Json<MemoryRecordDto>, ApiError> {
     require_admin(&claims).await?;
 
-    // Validate inputs.
-    if req.agent_id.trim().is_empty() {
-        return Err(ApiError::InvalidRequest(
-            "agent_id must not be empty".to_string(),
-        ));
+    // v1.6 multi-error validation: collect every problem, return all at once.
+    let mut errors: Vec<String> = Vec::new();
+
+    let agent_id = raw
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+    if agent_id.as_deref().is_none_or(str::is_empty) {
+        errors.push("agent_id (string, non-empty) is required".to_string());
     }
-    if req.content.trim().is_empty() {
-        return Err(ApiError::InvalidRequest(
-            "content must not be empty".to_string(),
-        ));
+
+    let level_str = raw
+        .get("level")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let level = match level_str.as_deref() {
+        Some(s) => match parse_level(s) {
+            Some(l) => Some(l),
+            None => {
+                errors.push(format!("level must be 'L0', 'L1', or 'L2' (got '{s}')"));
+                None
+            }
+        },
+        None => {
+            errors.push("level (string, one of L0/L1/L2) is required".to_string());
+            None
+        }
+    };
+
+    let content = raw
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+    if content.as_deref().is_none_or(str::is_empty) {
+        errors.push("content (string, non-empty) is required".to_string());
     }
-    let level = parse_level(&req.level)
-        .ok_or_else(|| ApiError::InvalidRequest(format!("unknown level: {}", req.level)))?;
+
+    let tags: Option<Vec<String>> = raw.get("tags").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect()
+    });
+
+    if !errors.is_empty() {
+        return Err(ApiError::InvalidRequest(format!(
+            "validation failed ({} error{}): {}",
+            errors.len(),
+            if errors.len() == 1 { "" } else { "s" },
+            errors.join("; ")
+        )));
+    }
+
+    // All fields validated; safe to unwrap.
+    let req = CreateMemoryRequest {
+        agent_id: agent_id.unwrap(),
+        level: level_str.unwrap(),
+        content: content.unwrap(),
+        tags,
+    };
+    let level = level.unwrap();
 
     let now = Utc::now();
     let memory_id = uuid::Uuid::new_v4().to_string();

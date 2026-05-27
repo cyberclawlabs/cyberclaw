@@ -38,6 +38,11 @@ description = "Controlled agent platform — Agent / Skill / Connector / Capabil
 # registries) in their own Cargo.toml.
 publish = false
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
 aho-corasick = "1.1"
 anyhow = "1.0"

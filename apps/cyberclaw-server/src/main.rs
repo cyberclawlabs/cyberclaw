@@ -7,6 +7,11 @@
 //! - Governance (策略与审批)
 //! - Observability (追踪与审计)
 
+// v1.7 final: mimalloc 在 macOS arm64 实测 -15% RPS（libsystem_malloc 已是 nano-malloc）。
+// 仅 Linux glibc 部署受益。见 docs/research/perf-tuning-before-after-2026-05-27.md。
+// #[global_allocator]
+// static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Result;
 use std::{env, net::SocketAddr, sync::Arc};
 use tokio::signal;

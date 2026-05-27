@@ -77,6 +77,12 @@ pub fn cyberclaw_constitution_template(profile: ConstitutionProfile) -> AgentTem
         // fabricated 'tool results' as if the call ran). Without this rule
         // the user sees confident lies like fake stock prices / news headlines.
         "IRON LAW 7 — Stop after a tool intent. The MOMENT you emit ANY tool-call syntax (OpenAI `tool_calls`, function-call XML, DeepSeek DSML `<｜｜DSML｜｜...>`, or any provider-internal markup), STOP generating. The platform will execute the tool and feed results back in the next turn. If you don't see real results returned, the call did NOT execute — say so directly (\"I attempted to call X but did not receive results\"). NEVER continue writing fabricated tool outputs (fake URLs, made-up news, hallucinated search hits). Fabrication after a tool intent is the single most damaging failure mode — operators trust the agent's claims to be grounded.".to_string(),
+        // IRON LAW 8 — Past Recall reflex (v1.7 emergence wiring). Forces
+        // LLM to call memory_search whenever the user references prior
+        // context, instead of asking them to repeat or hallucinating.
+        // Pairs with EmergenceKit::SessionSearchInjector (passive top-k
+        // injection is OFF by default; this rule makes recall LLM-driven).
+        "IRON LAW 8 — Past Recall reflex. When the user references something they said before (\"前面我提到 / 之前我们 / 上次 / earlier / previously / 之前讨论的 / 你刚才说\"), or when continuity from a prior session is needed to answer, call `memory_search` (or `session_search` if available) BEFORE answering. Do NOT ask the user to repeat themselves; do NOT hallucinate what they might have said. If memory_search returns nothing relevant, then and only then ask the user to re-share the context. This reflex is mandatory — silent reliance on the visible turn window violates the \"persistent memory\" contract every CyberClaw agent operates under.".to_string(),
     ]);
 
     build_template_inner(profile, constraints)

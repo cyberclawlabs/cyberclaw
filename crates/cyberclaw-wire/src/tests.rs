@@ -14,7 +14,9 @@ fn round_trip(frame: Frame) -> Frame {
 
 #[test]
 fn round_trip_token() {
-    let f = Frame::Token { content: "Hello, 世界".to_string() };
+    let f = Frame::Token {
+        content: "Hello, 世界".to_string(),
+    };
     assert_eq!(round_trip(f.clone()), f);
 }
 
@@ -70,7 +72,9 @@ fn round_trip_approval_pending() {
 
 #[test]
 fn round_trip_approval_granted() {
-    let f = Frame::ApprovalGranted { tool: "shell.run".to_string() };
+    let f = Frame::ApprovalGranted {
+        tool: "shell.run".to_string(),
+    };
     assert_eq!(round_trip(f.clone()), f);
 }
 
@@ -162,9 +166,11 @@ fn done_parse_from_sentinel() {
 
 #[test]
 fn version_envelope_present() {
-    let encoded = Frame::Token { content: "x".to_string() }
-        .to_sse_data()
-        .unwrap();
+    let encoded = Frame::Token {
+        content: "x".to_string(),
+    }
+    .to_sse_data()
+    .unwrap();
     let v: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(v.get("v").and_then(|n| n.as_u64()), Some(1));
     assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("token"));
@@ -202,7 +208,10 @@ fn unknown_type_returns_error() {
 fn version_mismatch_returns_error() {
     let payload = r#"{"v":2,"type":"token","data":{"content":"hi"}}"#;
     match Frame::from_sse_data(payload) {
-        Err(DecodeError::VersionMismatch { sender: 2, supported: 1 }) => {}
+        Err(DecodeError::VersionMismatch {
+            sender: 2,
+            supported: 1,
+        }) => {}
         other => panic!("expected VersionMismatch, got {other:?}"),
     }
 }
@@ -235,7 +244,12 @@ fn extra_fields_ignored() {
     // serde's default `deny_unknown_fields` is OFF for our enum.
     let payload = r#"{"v":1,"v_minor":3,"type":"token","data":{"content":"hi","future_field":42}}"#;
     let frame = Frame::from_sse_data(payload).expect("extra fields should be tolerated");
-    assert_eq!(frame, Frame::Token { content: "hi".to_string() });
+    assert_eq!(
+        frame,
+        Frame::Token {
+            content: "hi".to_string()
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -244,9 +258,11 @@ fn extra_fields_ignored() {
 
 #[test]
 fn encoded_token_matches_spec_shape() {
-    let encoded = Frame::Token { content: "Hello".to_string() }
-        .to_sse_data()
-        .unwrap();
+    let encoded = Frame::Token {
+        content: "Hello".to_string(),
+    }
+    .to_sse_data()
+    .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(parsed["v"], json!(1));
     assert_eq!(parsed["type"], json!("token"));
@@ -270,9 +286,7 @@ fn encoded_error_matches_spec_shape() {
 
 #[test]
 fn encoded_heartbeat_matches_spec_shape() {
-    let encoded = Frame::Heartbeat { elapsed_secs: 15 }
-        .to_sse_data()
-        .unwrap();
+    let encoded = Frame::Heartbeat { elapsed_secs: 15 }.to_sse_data().unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(parsed["v"], json!(1));
     assert_eq!(parsed["type"], json!("heartbeat"));

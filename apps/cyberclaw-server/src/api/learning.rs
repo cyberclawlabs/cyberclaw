@@ -716,10 +716,12 @@ async fn append_cycle_to_log(cycle: &EvolutionCycle) {
     }
 }
 
+/// v1.6 WP-1 #8: accepts raw JSON Value so we can collect ALL missing/invalid
+/// fields at once instead of serde returning the first error sequentially.
 async fn run_evolution(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<RunEvolutionRequest>,
+    Json(raw): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<RunEvolutionResponse>), ApiError> {
     if let Err(err) = require_admin(&claims).await {
         if let Some(sink) = state.audit.as_ref() {
@@ -738,21 +740,87 @@ async fn run_evolution(
         return Err(err);
     }
 
-    if req.skill_id.trim().is_empty() {
-        return Err(ApiError::InvalidInput(
-            "skill_id must not be empty".to_string(),
-        ));
+    // v1.6 multi-error validation: collect every problem before returning.
+    let mut errors: Vec<String> = Vec::new();
+
+    let skill_id = raw
+        .get("skill_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+    if skill_id.as_deref().is_none_or(str::is_empty) {
+        errors.push("skill_id (string, non-empty) is required".to_string());
     }
-    if req.target_skill_path.trim().is_empty() {
-        return Err(ApiError::InvalidInput(
-            "target_skill_path must not be empty".to_string(),
-        ));
+
+    let target_skill_path = raw
+        .get("target_skill_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+    if target_skill_path.as_deref().is_none_or(str::is_empty) {
+        errors.push("target_skill_path (string, non-empty) is required".to_string());
     }
-    if req.trigger_dataset.is_empty() {
-        return Err(ApiError::InvalidInput(
-            "trigger_dataset must contain at least one query".to_string(),
-        ));
+
+    // trigger_dataset: each entry needs `query` (string) + `should_trigger` (bool).
+    let trigger_dataset_value = raw.get("trigger_dataset").and_then(|v| v.as_array());
+    let mut trigger_dataset: Vec<TriggerQuery> = Vec::new();
+    match trigger_dataset_value {
+        None => errors.push(
+            "trigger_dataset (array of {query: string, should_trigger: bool}) is required"
+                .to_string(),
+        ),
+        Some(arr) if arr.is_empty() => {
+            errors.push("trigger_dataset must contain at least one query".to_string());
+        }
+        Some(arr) => {
+            for (i, item) in arr.iter().enumerate() {
+                let q = item.get("query").and_then(|v| v.as_str());
+                let st = item.get("should_trigger").and_then(|v| v.as_bool());
+                match (q, st) {
+                    (Some(q), Some(st)) => {
+                        trigger_dataset.push(TriggerQuery {
+                            query: q.to_string(),
+                            should_trigger: st,
+                        });
+                    }
+                    _ => {
+                        errors.push(format!(
+                            "trigger_dataset[{i}] needs both 'query' (string) and 'should_trigger' (bool)"
+                        ));
+                    }
+                }
+            }
+        }
     }
+
+    if !errors.is_empty() {
+        return Err(ApiError::InvalidInput(format!(
+            "validation failed ({} error{}): {}",
+            errors.len(),
+            if errors.len() == 1 { "" } else { "s" },
+            errors.join("; ")
+        )));
+    }
+
+    let max_iterations = raw
+        .get("max_iterations")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let min_pass_rate = raw
+        .get("min_pass_rate")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32);
+    let model = raw
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let req = RunEvolutionRequest {
+        skill_id: skill_id.unwrap(),
+        target_skill_path: target_skill_path.unwrap(),
+        trigger_dataset,
+        max_iterations,
+        min_pass_rate,
+        model,
+    };
 
     let cycle_id = format!("evo_{}", uuid::Uuid::new_v4().simple());
     let started_at = Utc::now();
@@ -1284,17 +1352,18 @@ mod tests {
         let (_tmp, _restore) = seed_users_with_role("op-viewer-evo", "viewer");
         let state = build_test_state();
         let claims = claims_for("op-viewer-evo");
+        let dataset_json: Vec<serde_json::Value> = sample_dataset()
+            .iter()
+            .map(|q| serde_json::json!({ "query": q.query, "should_trigger": q.should_trigger }))
+            .collect();
         let err = run_evolution(
             State(state),
             Extension(claims),
-            Json(RunEvolutionRequest {
-                skill_id: "sk_demo".to_string(),
-                target_skill_path: "/tmp/skill".to_string(),
-                trigger_dataset: sample_dataset(),
-                max_iterations: None,
-                min_pass_rate: None,
-                model: None,
-            }),
+            Json(serde_json::json!({
+                "skill_id": "sk_demo",
+                "target_skill_path": "/tmp/skill",
+                "trigger_dataset": dataset_json,
+            })),
         )
         .await
         .expect_err("viewer must be denied");
@@ -1310,14 +1379,11 @@ mod tests {
         let err = run_evolution(
             State(state),
             Extension(claims),
-            Json(RunEvolutionRequest {
-                skill_id: "sk_demo".to_string(),
-                target_skill_path: "/tmp/skill".to_string(),
-                trigger_dataset: Vec::new(),
-                max_iterations: None,
-                min_pass_rate: None,
-                model: None,
-            }),
+            Json(serde_json::json!({
+                "skill_id": "sk_demo",
+                "target_skill_path": "/tmp/skill",
+                "trigger_dataset": Vec::<serde_json::Value>::new(),
+            })),
         )
         .await
         .expect_err("empty dataset must 400");
@@ -1343,17 +1409,20 @@ mod tests {
 
         let state = build_test_state();
         let claims = claims_for("op-admin-evo-run");
+        let dataset_json: Vec<serde_json::Value> = sample_dataset()
+            .iter()
+            .map(|q| serde_json::json!({ "query": q.query, "should_trigger": q.should_trigger }))
+            .collect();
         let (code, Json(resp)) = run_evolution(
             State(state),
             Extension(claims),
-            Json(RunEvolutionRequest {
-                skill_id: "sk_demo".to_string(),
-                target_skill_path: missing_skill_dir.to_string_lossy().into_owned(),
-                trigger_dataset: sample_dataset(),
-                max_iterations: Some(1),
-                min_pass_rate: None,
-                model: Some("test-model".to_string()),
-            }),
+            Json(serde_json::json!({
+                "skill_id": "sk_demo",
+                "target_skill_path": missing_skill_dir.to_string_lossy().into_owned(),
+                "trigger_dataset": dataset_json,
+                "max_iterations": 1,
+                "model": "test-model",
+            })),
         )
         .await
         .expect("admin happy path returns 202");

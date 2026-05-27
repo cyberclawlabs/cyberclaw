@@ -525,7 +525,11 @@ pub fn build_governing_gateway(state: &Arc<AppState>) -> Arc<dyn OrchestratorGat
     let workspace_root_default: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| ".".to_string());
 
     // Sprint 18 W3 — workspace writable roots are env-driven so staging
@@ -910,8 +914,8 @@ pub async fn agent_chat_completions(
     // ToolFactVerifier. CodeBlockVerifier omitted — requires exec runtime
     // wiring (sprint 3c). JsonStructureVerifier + RegexAssertVerifier are
     // pure-local and safe to enable now.
-    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone())
-        .with_governor(governor);
+    let mut agentic_loop =
+        DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone()).with_governor(governor);
 
     // Phase 3 of LLM output reliability architecture
     // (docs/implementation/release/llm-output-reliability-architecture-2026-05-25.md).
@@ -1055,7 +1059,11 @@ pub async fn agent_chat_completions(
         let workspace_root_hint: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| ".".to_string());
         loop_config.system_prompt = format!(
             "{}\n\nYour workspace root is `{workspace_root_hint}`. \
@@ -1164,6 +1172,26 @@ pub async fn agent_chat_completions(
              governance. Please rephrase the request or check the audit log for details.",
             finish_reason, summary.iterations, summary.tokens_used
         );
+    }
+
+    // v1.7 emergence wiring: per-turn heuristic verification (observability only).
+    {
+        use cyberclaw_agent_runtime::chat_verification_gate::ChatTurnContext;
+        use cyberclaw_agent_runtime::emergence_kit::{observe_chat_turn, EmergenceProfile};
+        let last_user_prompt = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        let ctx = ChatTurnContext {
+            assistant_text: &response_text,
+            tool_intent_pending: false,
+            user_prompt: last_user_prompt,
+            iteration: Some(summary.iterations as u32),
+        };
+        observe_chat_turn(EmergenceProfile::Chat, &ctx, "agent_chat_completions");
     }
 
     let now_ts = chrono::Utc::now().timestamp() as u64;
@@ -1409,8 +1437,8 @@ async fn agent_chat_completions_streaming(
     let wall_clock_secs = governor_config.wall_clock_budget.as_secs();
     let governor = AgenticLoopGovernor::new(governor_config);
 
-    let mut agentic_loop = DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone())
-        .with_governor(governor);
+    let mut agentic_loop =
+        DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone()).with_governor(governor);
     agentic_loop.resolve_skill_bindings(&agent_default_skills, Some(&execution_context));
 
     let mut bound_ecosystems: Vec<cyberclaw_skill_runtime::compat::SourceEcosystem> = Vec::new();
@@ -1486,7 +1514,11 @@ async fn agent_chat_completions_streaming(
         let workspace_root_hint: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| ".".to_string());
         loop_config.system_prompt = format!(
             "{}\n\nYour workspace root is `{workspace_root_hint}`. \
@@ -1623,7 +1655,11 @@ async fn agent_chat_completions_streaming(
                     kind: "timeout".to_string(),
                     // Timeout is local to the orchestrator, not an LLM-side
                     // failover condition, so no LlmFailoverReason applies.
-                    reason: Some(cyberclaw_llm::LlmFailoverReason::Timeout.wire_name().to_string()),
+                    reason: Some(
+                        cyberclaw_llm::LlmFailoverReason::Timeout
+                            .wire_name()
+                            .to_string(),
+                    ),
                 });
                 let _ = tx_for_task.send(StreamFrame::Done);
                 return;
@@ -1778,16 +1814,16 @@ async fn agent_chat_completions_streaming(
                 // ApiError variants we still emit `reason: None` to preserve
                 // the legacy contract.
                 let (message, kind, reason) = match &api_err {
-                    ApiError::InvalidRequest(m) => {
-                        (m.clone(), "invalid_request".to_string(), None)
-                    }
+                    ApiError::InvalidRequest(m) => (m.clone(), "invalid_request".to_string(), None),
                     ApiError::LlmError(m) => {
                         let r = cyberclaw_llm::classify_llm_error(None, m);
-                        (m.clone(), "llm_error".to_string(), Some(r.wire_name().to_string()))
+                        (
+                            m.clone(),
+                            "llm_error".to_string(),
+                            Some(r.wire_name().to_string()),
+                        )
                     }
-                    ApiError::InternalError(m) => {
-                        (m.clone(), "internal".to_string(), None)
-                    }
+                    ApiError::InternalError(m) => (m.clone(), "internal".to_string(), None),
                     other => (other.to_string(), "error".to_string(), None),
                 };
                 let _ = tx_for_task.send(StreamFrame::ErrorMsg {
@@ -4778,7 +4814,11 @@ mod tests {
         let workspace_root: String = std::env::var("CYBERCLAW_AGENT_WORKSPACE_ROOT")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| ".".to_string());
 
         // Restore env vars.
@@ -4811,7 +4851,11 @@ mod tests {
         let frame = StreamFrame::ErrorMsg {
             message: "jwt expired".to_string(),
             kind: "llm_error".to_string(),
-            reason: Some(cyberclaw_llm::LlmFailoverReason::AuthExpired.wire_name().to_string()),
+            reason: Some(
+                cyberclaw_llm::LlmFailoverReason::AuthExpired
+                    .wire_name()
+                    .to_string(),
+            ),
         };
         let event = stream_frame_to_sse_event(&frame);
         // The Event's underlying data is opaque outside axum; rebuild the
@@ -4863,4 +4907,3 @@ mod tests {
         assert_eq!(error_obj["reason"], "auth_invalid");
     }
 }
-

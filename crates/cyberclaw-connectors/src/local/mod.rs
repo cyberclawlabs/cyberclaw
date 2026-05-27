@@ -139,7 +139,8 @@ fn check_write_content_gate(capability_id: &str, input: &serde_json::Value) -> a
                  Do not claim it was written. Do not fabricate ls output or \
                  file contents. This is a hard policy gate — you cannot \
                  retry the same content.",
-                rule_id, reason
+                rule_id,
+                reason
             ))
         }
         FilterDecision::Warn { rule_id, reason } => {
@@ -1238,7 +1239,9 @@ mod resolve_agent_workspace_tests {
         );
         let err = blocked.unwrap_err().to_string();
         assert!(
-            err.contains("[BOUNDARY DENY]") || err.contains("outside workspace") || err.contains(".."),
+            err.contains("[BOUNDARY DENY]")
+                || err.contains("outside workspace")
+                || err.contains(".."),
             "error should explain containment violation: {err}"
         );
 
@@ -1342,13 +1345,9 @@ mod governance_deny_format_tests {
         // Attempt to validate an absolute path outside the temp workspace
         // (e.g. /tmp/wordcount-cb.txt is outside tmp.path())
         let outside_path = "/tmp/cyberclaw-test-boundary-marker.txt";
-        let result =
-            LocalConnector::validate_path_against_root(outside_path, tmp.path());
+        let result = LocalConnector::validate_path_against_root(outside_path, tmp.path());
 
-        assert!(
-            result.is_err(),
-            "path outside workspace must be rejected"
-        );
+        assert!(result.is_err(), "path outside workspace must be rejected");
 
         let msg = result.unwrap_err().to_string();
         assert!(

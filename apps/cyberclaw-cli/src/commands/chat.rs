@@ -706,9 +706,12 @@ fn parse_legacy_sse_data(data: &str) -> SseFrame {
                 let reason = err_obj
                     .get("reason")
                     .and_then(|r| r.as_str())
-                    .and_then(|s| serde_json::from_value::<LlmFailoverReason>(
-                        serde_json::Value::String(s.to_string()),
-                    ).ok());
+                    .and_then(|s| {
+                        serde_json::from_value::<LlmFailoverReason>(serde_json::Value::String(
+                            s.to_string(),
+                        ))
+                        .ok()
+                    });
                 return SseFrame::ErrorMsg {
                     message,
                     kind,
@@ -855,11 +858,7 @@ async fn send_message(
     let client_clone = client.clone();
     let server_owned = server.to_string();
     let token_owned = token.to_string();
-    let conv_id_owned = new_conv_id
-        .as_deref()
-        .or(conv_id)
-        .unwrap_or("")
-        .to_string();
+    let conv_id_owned = new_conv_id.as_deref().or(conv_id).unwrap_or("").to_string();
     let ctrl_c = ctrl_c_flag.clone();
 
     stream_sse(resp, |frame| {
@@ -900,10 +899,7 @@ async fn send_message(
                         "\n[!] Awaiting approval for {} ({}) — check /approvals",
                         tool, r
                     ),
-                    None => println!(
-                        "\n[!] Awaiting approval for {} — check /approvals",
-                        tool
-                    ),
+                    None => println!("\n[!] Awaiting approval for {} — check /approvals", tool),
                 }
                 let _ = io::stdout().flush();
                 true
@@ -911,7 +907,11 @@ async fn send_message(
             // v1.3 WP-4 Change 3: print the typed-reason friendly hint
             // alongside the raw message so the REPL user gets actionable
             // text instead of a silently-dropped frame.
-            SseFrame::ErrorMsg { message, kind, reason } => {
+            SseFrame::ErrorMsg {
+                message,
+                kind,
+                reason,
+            } => {
                 match reason {
                     Some(r) => println!(
                         "\n[!] Error ({kind}): {message}\n    {}",
@@ -928,7 +928,12 @@ async fn send_message(
                 let _ = io::stdout().flush();
                 true
             }
-            SseFrame::ToolComplete { tool, ok, duration_ms, .. } => {
+            SseFrame::ToolComplete {
+                tool,
+                ok,
+                duration_ms,
+                ..
+            } => {
                 let mark = if ok { '\u{2713}' } else { '\u{2717}' };
                 print!("\n[tool: {tool} {mark} {duration_ms}ms]\n");
                 let _ = io::stdout().flush();
@@ -1282,13 +1287,14 @@ pub async fn send_message_tui(
             // v1.3 WP-4 Change 3 + WP-3 Step 6: route SSE error frames through
             // the TUI's error channel with a typed visual prefix and the
             // friendly hint appended so the user gets actionable text.
-            SseFrame::ErrorMsg { message, kind, reason } => {
+            SseFrame::ErrorMsg {
+                message,
+                kind,
+                reason,
+            } => {
                 let prefix = typed_error_prefix(reason, &kind);
                 let composed = match reason {
-                    Some(r) => format!(
-                        "{prefix} {message}\n  {}",
-                        friendly_error_message(r),
-                    ),
+                    Some(r) => format!("{prefix} {message}\n  {}", friendly_error_message(r),),
                     None => format!("{prefix} {message}"),
                 };
                 let _ = tok.try_send(chat_tui::TokenEvent::Error(composed));
@@ -1300,7 +1306,12 @@ pub async fn send_message_tui(
                 let _ = tok.try_send(chat_tui::TokenEvent::ToolStart { tool, args });
                 true
             }
-            SseFrame::ToolComplete { tool, ok, preview, duration_ms } => {
+            SseFrame::ToolComplete {
+                tool,
+                ok,
+                preview,
+                duration_ms,
+            } => {
                 let _ = tok.try_send(chat_tui::TokenEvent::ToolComplete {
                     tool,
                     ok,
@@ -1808,10 +1819,15 @@ mod tests {
 
     #[test]
     fn test_parse_sse_error_frame_with_typed_reason() {
-        let data = r#"{"error":{"message":"jwt expired","type":"llm_error","reason":"auth_expired"}}"#;
+        let data =
+            r#"{"error":{"message":"jwt expired","type":"llm_error","reason":"auth_expired"}}"#;
         let frame = parse_sse_data(data);
         match frame {
-            SseFrame::ErrorMsg { message, kind, reason } => {
+            SseFrame::ErrorMsg {
+                message,
+                kind,
+                reason,
+            } => {
                 assert_eq!(message, "jwt expired");
                 assert_eq!(kind, "llm_error");
                 assert_eq!(reason, Some(LlmFailoverReason::AuthExpired));
@@ -1827,7 +1843,11 @@ mod tests {
         let data = r#"{"error":{"message":"oops","type":"internal"}}"#;
         let frame = parse_sse_data(data);
         match frame {
-            SseFrame::ErrorMsg { message, kind, reason } => {
+            SseFrame::ErrorMsg {
+                message,
+                kind,
+                reason,
+            } => {
                 assert_eq!(message, "oops");
                 assert_eq!(kind, "internal");
                 assert_eq!(reason, None);
@@ -1877,8 +1897,14 @@ mod tests {
 
         // After processing both chunks the residual must be empty and the
         // assembled text must equal the original string.
-        assert!(residual.is_empty(), "residual should be empty after all chunks");
-        assert_eq!(assembled, full, "assembled text must equal original CJK string");
+        assert!(
+            residual.is_empty(),
+            "residual should be empty after all chunks"
+        );
+        assert_eq!(
+            assembled, full,
+            "assembled text must equal original CJK string"
+        );
     }
 
     // ─── v1.3 WP-3 — typed wire envelope tests ──────────────────────────
@@ -1895,7 +1921,8 @@ mod tests {
 
     #[test]
     fn test_parse_wire_frame_tool_start() {
-        let envelope = r#"{"v":1,"type":"tool_start","data":{"tool":"fs.read","args":{"path":"/tmp/x"}}}"#;
+        let envelope =
+            r#"{"v":1,"type":"tool_start","data":{"tool":"fs.read","args":{"path":"/tmp/x"}}}"#;
         match parse_sse_data(envelope) {
             SseFrame::ToolStart { tool, args } => {
                 assert_eq!(tool, "fs.read");
@@ -1909,7 +1936,12 @@ mod tests {
     fn test_parse_wire_frame_tool_complete() {
         let envelope = r#"{"v":1,"type":"tool_complete","data":{"tool":"fs.read","ok":true,"preview":"ok","duration_ms":42}}"#;
         match parse_sse_data(envelope) {
-            SseFrame::ToolComplete { tool, ok, preview, duration_ms } => {
+            SseFrame::ToolComplete {
+                tool,
+                ok,
+                preview,
+                duration_ms,
+            } => {
                 assert_eq!(tool, "fs.read");
                 assert!(ok);
                 assert_eq!(preview, "ok");
@@ -1921,9 +1953,14 @@ mod tests {
 
     #[test]
     fn test_parse_wire_frame_error_typed_kind() {
-        let envelope = r#"{"v":1,"type":"error","data":{"message":"jwt expired","kind":"auth_expired"}}"#;
+        let envelope =
+            r#"{"v":1,"type":"error","data":{"message":"jwt expired","kind":"auth_expired"}}"#;
         match parse_sse_data(envelope) {
-            SseFrame::ErrorMsg { message, kind: _kind, reason } => {
+            SseFrame::ErrorMsg {
+                message,
+                kind: _kind,
+                reason,
+            } => {
                 assert_eq!(message, "jwt expired");
                 assert_eq!(reason, Some(LlmFailoverReason::AuthExpired));
             }
@@ -1947,8 +1984,10 @@ mod tests {
         let envelope = r#"{"v":2,"type":"token","data":{"content":"hi"}}"#;
         match parse_sse_data(envelope) {
             SseFrame::ErrorMsg { message, kind, .. } => {
-                assert!(message.contains("v2") || message.contains("update"),
-                    "version mismatch message should mention version / update; got: {message}");
+                assert!(
+                    message.contains("v2") || message.contains("update"),
+                    "version mismatch message should mention version / update; got: {message}"
+                );
                 assert_eq!(kind, "version_mismatch");
             }
             other => panic!("expected ErrorMsg version_mismatch, got {other:?}"),

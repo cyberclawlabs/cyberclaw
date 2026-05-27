@@ -1,0 +1,21 @@
+# git-secrets allowed patterns — placeholder / test fixture / sanitization marker
+# 这些 sk-... 出现是已知 safe 的:
+#   - sk-your-...-here / sk-staging-placeholder / sk-e2e-placeholder = README + .env.example placeholders
+#   - sk-test1234 / sk-ABCDEFG... / sk-ant-secret-key-12345 = 单元测试 fixture
+#   - sk-ant-api03-abcdefghi / sk-proj1234567890 = leak_detector / sanitizer 自己的测试输入
+# 任何真实凭据必须从 env 注入，不能 hardcode 在 source。
+sk-your-[a-zA-Z0-9_-]+
+sk-ant-your-[a-zA-Z0-9_-]+
+sk-staging-placeholder[a-zA-Z0-9_-]*
+sk-e2e-placeholder[a-zA-Z0-9_-]*
+sk-test[a-zA-Z0-9_-]+
+sk-ABCDEFG[a-zA-Z0-9]+
+sk-ant-secret-key-[a-zA-Z0-9-]+
+sk-ant-api03-abcdefg[a-zA-Z0-9]*
+sk-proj[0-9]+[a-zA-Z0-9]*
+ghp_xxxxxxxxxxxxx[a-zA-Z0-9]*
+# 测试 fixture for secret_scanner: ghp_<lowercase alphabet><uppercase A-F><digits>
+ghp_[a-z]{26}[A-F]{6}[0-9]{10}
+GITHUB_PERSONAL_ACCESS_TOKEN.*xxx
+Bearer sk-xxxxxxx[a-zA-Z0-9]*
+Bearer invalid\.jwt\.token

@@ -90,10 +90,11 @@ impl SessionBusyGuard {
     /// Attempt to claim `id`. Returns `Some(guard)` on success and `None`
     /// when another request currently owns the flag.
     fn try_acquire(id: &ConversationId) -> Option<Self> {
-        let mut map = SESSION_BUSY
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let flag = map.entry(id.clone()).or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
+        let mut map = SESSION_BUSY.lock().unwrap_or_else(|e| e.into_inner());
+        let flag = map
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
         // CAS false→true. compare_exchange returns Err if it was already true.
         if flag
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -211,7 +212,10 @@ pub struct AgentUsageV2 {
 /// `GET /v2/conversations/:id/messages`.
 pub fn create_agent_chat_v2_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v2/agent/chat/completions", post(agent_chat_completions_v2))
+        .route(
+            "/v2/agent/chat/completions",
+            post(agent_chat_completions_v2),
+        )
         .route(
             "/v2/conversations/:id/messages",
             get(get_conversation_messages),
@@ -241,16 +245,13 @@ pub async fn agent_chat_completions_v2(
     // ---- Resolve session (existing vs new) ----
     let (conversation_id, is_new) = match req.conversation_id.as_deref() {
         Some(raw) => {
-            let id = ConversationId::from_string(raw.to_string()).map_err(|e| {
-                ApiError::InvalidRequest(format!("conversation_id: {}", e))
-            })?;
+            let id = ConversationId::from_string(raw.to_string())
+                .map_err(|e| ApiError::InvalidRequest(format!("conversation_id: {}", e)))?;
             let existing = state
                 .conversation_session_store
                 .get(&id)
                 .await
-                .ok_or_else(|| {
-                    ApiError::NotFound(format!("conversation {} not found", raw))
-                })?;
+                .ok_or_else(|| ApiError::NotFound(format!("conversation {} not found", raw)))?;
             if existing.owner != owner {
                 return Err(ApiError::Forbidden(format!(
                     "conversation {} is owned by a different principal",
@@ -425,11 +426,29 @@ async fn agent_chat_completions_v2_non_streaming(
         .map_err(ApiError::InternalError)?;
 
     // ---- Build response ----
-    let mut response_text = final_text.unwrap_or_else(|| summary.final_output.clone().unwrap_or_default());
+    let mut response_text =
+        final_text.unwrap_or_else(|| summary.final_output.clone().unwrap_or_default());
     if response_text.trim().is_empty() {
         response_text = format!(
             "I was unable to produce a response (finish_reason={}, iterations={}, tokens={}).",
             finish_reason, summary.iterations, summary.tokens_used
+        );
+    }
+
+    // v1.7 emergence wiring: per-turn heuristic verification (observability only).
+    {
+        use cyberclaw_agent_runtime::chat_verification_gate::ChatTurnContext;
+        use cyberclaw_agent_runtime::emergence_kit::{observe_chat_turn, EmergenceProfile};
+        let ctx = ChatTurnContext {
+            assistant_text: &response_text,
+            tool_intent_pending: false,
+            user_prompt: &req.message,
+            iteration: Some(summary.iterations as u32),
+        };
+        observe_chat_turn(
+            EmergenceProfile::Chat,
+            &ctx,
+            "agent_chat_completions_v2_non_streaming",
         );
     }
 
@@ -611,10 +630,7 @@ async fn agent_chat_completions_v2_streaming(
                                 tokio::time::sleep(Duration::from_millis(12)).await;
                             }
                             let chunk = std::mem::take(&mut buf);
-                            if tx_for_task
-                                .send(StreamFramePub::Token(chunk))
-                                .is_err()
-                            {
+                            if tx_for_task.send(StreamFramePub::Token(chunk)).is_err() {
                                 return;
                             }
                             idx += 1;
@@ -643,7 +659,11 @@ async fn agent_chat_completions_v2_streaming(
                     ApiError::InternalError(m) => (m.clone(), "internal".to_string()),
                     other => (other.to_string(), "error".to_string()),
                 };
-                let _ = tx_for_task.send(StreamFramePub::ErrorMsg { message, kind, reason: None });
+                let _ = tx_for_task.send(StreamFramePub::ErrorMsg {
+                    message,
+                    kind,
+                    reason: None,
+                });
                 let _ = tx_for_task.send(StreamFramePub::Done);
             }
         }
@@ -770,9 +790,8 @@ async fn build_loop_from_session(
     };
 
     // Memory integration.
-    let session_id = SessionId::from_string(format!("v2-{}", request_id)).map_err(|e| {
-        ApiError::InternalError(format!("failed to allocate session id: {}", e))
-    })?;
+    let session_id = SessionId::from_string(format!("v2-{}", request_id))
+        .map_err(|e| ApiError::InternalError(format!("failed to allocate session id: {}", e)))?;
     let working_memory = Arc::new(InMemoryWorkingMemory::new(WorkingMemoryConfig {
         capacity: 100,
         ttl_seconds: None,
@@ -901,7 +920,9 @@ pub async fn get_conversation_messages(
 
 #[cfg(test)]
 mod tests {
-    use cyberclaw_store::{ConversationId, ConversationSession, InMemorySessionStore, SessionStore};
+    use cyberclaw_store::{
+        ConversationId, ConversationSession, InMemorySessionStore, SessionStore,
+    };
 
     fn make_session(id: ConversationId, owner: &str) -> ConversationSession {
         ConversationSession::new(

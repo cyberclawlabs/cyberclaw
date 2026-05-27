@@ -800,18 +800,21 @@ fn extract_path_claims(response: &str) -> Vec<(String, String)> {
         let path_start = path_match.start();
 
         // Find the nearest SUCCESS_VERB that precedes this path within 80 chars.
-        let nearest_verb = verb_offsets.iter().filter_map(|(offset, verb)| {
-            if *offset < path_start {
-                let gap = path_start - offset;
-                if gap <= 80 {
-                    Some((gap, *verb))
+        let nearest_verb = verb_offsets
+            .iter()
+            .filter_map(|(offset, verb)| {
+                if *offset < path_start {
+                    let gap = path_start - offset;
+                    if gap <= 80 {
+                        Some((gap, *verb))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
-            }
-        }).min_by_key(|(gap, _)| *gap);
+            })
+            .min_by_key(|(gap, _)| *gap);
 
         if let Some((_, verb)) = nearest_verb {
             results.push((verb.to_string(), path.to_string()));
@@ -1459,7 +1462,10 @@ print(2+2)
         let out = v.verify("prompt", response, &VerifyCtx::new()).await;
         match out {
             VerificationDirective::RejectAndRetry(msg) => {
-                assert!(msg.contains("/tmp/foo.txt"), "feedback should name the path");
+                assert!(
+                    msg.contains("/tmp/foo.txt"),
+                    "feedback should name the path"
+                );
                 assert!(
                     msg.contains("no tool was invoked"),
                     "feedback should explain the missing tool call"

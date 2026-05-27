@@ -1665,7 +1665,9 @@ mod tests {
         );
         let err_str = result.error.unwrap_or_default();
         assert!(
-            err_str.contains("governance") || err_str.contains("D010") || err_str.contains("credential"),
+            err_str.contains("governance")
+                || err_str.contains("D010")
+                || err_str.contains("credential"),
             "error should reference governance/credential block, got: {err_str}"
         );
     }

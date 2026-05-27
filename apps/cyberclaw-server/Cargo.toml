@@ -105,6 +105,10 @@ tempfile = "3"
 # v1.3 WP-1 — process-global session busy registry in chat_handler_v2
 once_cell.workspace = true
 
+# v1.7 final — 实测 mimalloc 在 macOS arm64 -15% RPS (libsystem_malloc 已优化)。
+# 见 docs/research/perf-tuning-before-after-2026-05-27.md。
+# Linux 部署可考虑重新启用：mimalloc = { version = "0.1", default-features = false }
+
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 futures = "0.3"

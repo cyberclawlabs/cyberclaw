@@ -385,9 +385,7 @@ mod tests {
     async fn test_update_missing_returns_err() {
         let store = InMemorySessionStore::new();
         let id = ConversationId::new();
-        let result = store
-            .update(&id, Box::new(|_| { /* no-op */ }))
-            .await;
+        let result = store.update(&id, Box::new(|_| { /* no-op */ })).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
@@ -479,7 +477,10 @@ mod tests {
         let newest_id = newest.id.clone();
         store.put(newest).await.expect("put3");
 
-        assert!(store.get(&oldest_id).await.is_none(), "oldest should be evicted");
+        assert!(
+            store.get(&oldest_id).await.is_none(),
+            "oldest should be evicted"
+        );
         assert!(store.get(&middle_id).await.is_some());
         assert!(store.get(&newest_id).await.is_some());
 
