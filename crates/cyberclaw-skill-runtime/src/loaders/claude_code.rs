@@ -69,6 +69,38 @@ impl Default for ClaudeCodeSkillLoader {
     }
 }
 
+/// 提取 SKILL.md frontmatter 之后的正文 (markdown body).
+///
+/// 输入是完整的 SKILL.md 文本; 返回 Some(body) 当能找到两个 `---` 分隔符,
+/// 否则 None (let prompt_extension stay empty).
+///
+/// 文档中"---"之后的全部正文都被保留, 包含表格 / 代码块 / 引用链接 — 这些
+/// 才是 LLM 需要看到的 actionable content。
+fn extract_body_after_frontmatter(content: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() || !lines[0].trim().starts_with("---") {
+        return None;
+    }
+    let end_idx = lines
+        .iter()
+        .skip(1)
+        .position(|line| line.trim().starts_with("---"))?
+        + 1;
+    // body 从 closing `---` 之后开始 (跳过空行后剩余全文)
+    let body: String = lines
+        .iter()
+        .skip(end_idx + 1)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[async_trait]
 impl FormatLoader for ClaudeCodeSkillLoader {
     fn can_load(&self, path: &Path) -> bool {
@@ -88,7 +120,14 @@ impl FormatLoader for ClaudeCodeSkillLoader {
         })?;
 
         // 解析元数据
-        let metadata = self.parse_frontmatter(&content)?;
+        let mut metadata = self.parse_frontmatter(&content)?;
+
+        // v1.8 Bug D fix: SKILL.md body (frontmatter 之后的正文) 必须注入 LLM
+        // prompt — Anthropic / hermes-agent 都这样做。之前 cb 只保留 frontmatter
+        // 导致 LLM 看不到 "Read [pptxgenjs.md] for full details" 等 actionable
+        // 内容, 自由发挥写坏 XML。
+        // 见 docs/research/skill-md-body-pipeline-gap-2026-05-28.md
+        metadata.prompt_body = extract_body_after_frontmatter(&content);
 
         // 生成 Skill ID（使用目录名）
         let skill_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {

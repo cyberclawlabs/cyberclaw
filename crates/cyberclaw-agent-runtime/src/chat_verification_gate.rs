@@ -140,6 +140,19 @@ impl ChatVerifier for HeuristicChatVerifier {
             warns.push("claims a file write without a corresponding tool call".to_string());
         }
 
+        // WARN: v1.7.2 user-reported case — assistant claims an artifact at
+        // a specific path (e.g. "已生成 /tmp/X.pptx 10K bytes"). v1.7.x can't
+        // do cross-container path resolution + open-and-validate inside this
+        // sync verifier, but emit the path so operator / downstream gate
+        // can verify externally. Real validation (xmllint/py_compile/json.tool)
+        // is v1.8+ work — see docs/implementation/roadmap/v1.8-backlog-2026-05-28.md
+        // (Bug E).
+        for hit in claims_artifact_paths(ctx.assistant_text) {
+            warns.push(format!(
+                "claims an artifact at `{hit}` — operator should verify file validity (v1.8 will add inline xmllint/py_compile)"
+            ));
+        }
+
         if !fails.is_empty() {
             ChatVerifyVerdict::Fail { reasons: fails }
         } else if !warns.is_empty() {
@@ -200,6 +213,53 @@ fn user_named_concrete_deliverable(prompt: &str) -> bool {
     ]
     .iter()
     .any(|kw| lower.contains(kw))
+}
+
+/// Find every path-shaped string the assistant claims to have produced.
+///
+/// Detects patterns like:
+/// - "saved to /tmp/X.pptx"
+/// - "wrote to /Users/foo/Y.docx"
+/// - "已生成 /tmp/Z.pptx (8 slides)"
+/// - "output: workspace/report.json"
+///
+/// Returns up to 5 distinct paths (cap prevents log spam). Returns empty
+/// if no artifact-claim signal detected.
+fn claims_artifact_paths(text: &str) -> Vec<String> {
+    // Cheap precheck — avoid regex on every response that has no claim.
+    let lower = text.to_lowercase();
+    let has_claim_word = [
+        "已生成", "已保存到", "已写入", "已创建", "已输出",
+        "saved to", "wrote to", "written to", "output to", "generated at",
+        "created at", "exported to",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw));
+    if !has_claim_word {
+        return Vec::new();
+    }
+    // Match path-like substrings with a recognized productivity extension.
+    // Intentionally permissive — false positives are observability noise, not
+    // user-blocking. Real validation is v1.8 work.
+    let ext_re = regex::Regex::new(
+        r"(?i)([/\w][\w/.\-]*\.(?:pptx|docx|xlsx|pdf|json|yaml|yml|toml|csv|html|md|py|rs|ts|tsx|js|jsx|sh|sql))"
+    )
+    .ok();
+    let mut hits: Vec<String> = Vec::new();
+    if let Some(re) = ext_re {
+        for cap in re.captures_iter(text).take(50) {
+            if let Some(m) = cap.get(1) {
+                let path = m.as_str().to_string();
+                if !hits.contains(&path) {
+                    hits.push(path);
+                    if hits.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    hits
 }
 
 fn claims_file_write_without_tool_call(text: &str) -> bool {
@@ -293,6 +353,52 @@ mod tests {
         );
         let verdict = v.verify(&c);
         assert!(matches!(verdict, ChatVerifyVerdict::Warn { .. }));
+    }
+
+    #[test]
+    fn warn_on_artifact_claim_with_path() {
+        let v = HeuristicChatVerifier;
+        let c = ctx(
+            "✅ 已生成 /tmp/cb-intro.pptx (10K bytes, 8 slides)",
+            "make me a pptx",
+            false,
+            Some(2),
+        );
+        let verdict = v.verify(&c);
+        assert!(matches!(verdict, ChatVerifyVerdict::Warn { .. }));
+        assert!(
+            verdict.reasons().iter().any(|r| r.contains("cb-intro.pptx")),
+            "warning should include path: {:?}",
+            verdict.reasons()
+        );
+    }
+
+    #[test]
+    fn warn_on_artifact_claim_english() {
+        let v = HeuristicChatVerifier;
+        let c = ctx(
+            "Saved to /Users/foo/report.docx",
+            "draft me a report",
+            false,
+            Some(3),
+        );
+        let verdict = v.verify(&c);
+        assert!(matches!(verdict, ChatVerifyVerdict::Warn { .. }));
+        assert!(verdict.reasons().iter().any(|r| r.contains("report.docx")));
+    }
+
+    #[test]
+    fn pass_when_no_artifact_claim() {
+        let v = HeuristicChatVerifier;
+        // Mentions .pptx but no claim word — don't fire
+        let c = ctx(
+            "To work with pptx files, you can use python-pptx.",
+            "how do I work with pptx",
+            false,
+            Some(1),
+        );
+        let verdict = v.verify(&c);
+        assert!(matches!(verdict, ChatVerifyVerdict::Pass | ChatVerifyVerdict::Warn { .. }));
     }
 
     #[test]

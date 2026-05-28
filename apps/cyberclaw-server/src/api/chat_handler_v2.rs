@@ -511,7 +511,7 @@ async fn agent_chat_completions_v2_streaming(
     let (loop_config, mut agentic_loop, mut memory_integration, gateway, bound_ecosystems) =
         build_loop_from_session(&state, &session, &req, &request_id).await?;
 
-    let governor_config = GovernorConfig::default();
+    let governor_config = GovernorConfig::from_env_or_default();
     let wall_clock_secs = governor_config.wall_clock_budget.as_secs();
 
     agentic_loop.init(loop_config).await.map_err(|e| {
@@ -786,7 +786,7 @@ async fn build_loop_from_session(
         stuck_threshold: 3,
         tools,
         cache_system_prompt: cache_system_enabled,
-        per_tool_max_calls: 4,
+        per_tool_max_calls: std::env::var("CYBERCLAW_PER_TOOL_MAX_CALLS").ok().and_then(|s| s.parse().ok()).unwrap_or(12),
     };
 
     // Memory integration.
@@ -825,7 +825,7 @@ async fn build_loop_from_session(
     };
     let agent_default_skills: Vec<cyberclaw_core::ids::SkillId> = Vec::new();
 
-    let governor = AgenticLoopGovernor::new(GovernorConfig::default());
+    let governor = AgenticLoopGovernor::new(GovernorConfig::from_env_or_default());
     let mut agentic_loop =
         DefaultAgenticLoop::new(state.llm_client.clone(), gateway.clone()).with_governor(governor);
     agentic_loop.resolve_skill_bindings(&agent_default_skills, Some(&execution_context));

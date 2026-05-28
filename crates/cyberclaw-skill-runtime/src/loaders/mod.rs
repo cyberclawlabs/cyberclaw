@@ -78,6 +78,16 @@ pub struct SkillMetadata {
     /// 资产文件列表
     #[serde(default)]
     pub assets: Vec<String>,
+    /// SKILL.md 去 frontmatter 后的正文 — Anthropic/Hermes pattern:
+    /// 这里是 actionable content (e.g. "Read [pptxgenjs.md] for full details",
+    /// `python scripts/X.py` 等), 必须注入 LLM system prompt 让模型看到现成
+    /// 可跑命令而非自己重新发明。
+    ///
+    /// 由 loader 填充 (claude_code / codex / hermes 等), 在 SkillContext 转换时
+    /// 流向 `prompt_extension`. v1.7.2 之前永远为 `None` 是 v1.8 修的 Bug D.
+    /// 见 `docs/research/skill-md-body-pipeline-gap-2026-05-28.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_body: Option<String>,
     /// 平台列表 (Hermes 兼容)
     #[serde(default)]
     pub platforms: Vec<String>,

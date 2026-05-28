@@ -91,6 +91,7 @@ impl SkillRuntime for MockSkillRuntime {
                 tools: vec![],
                 scripts: vec![],
                 assets: vec![],
+                prompt_body: None,
                 platforms: vec![],
                 triggers: vec![],
                 required_toolsets: vec![],

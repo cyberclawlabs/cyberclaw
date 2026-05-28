@@ -65,7 +65,14 @@ pub struct GovernorConfig {
     /// Default: 300 s.
     pub wall_clock_budget: Duration,
     /// Maximum cumulative tokens (input + output) across all iterations.
-    /// Trips gate 2. Default: 128 000. `0` means unlimited.
+    /// Trips gate 2. Default: 512 000. `0` means unlimited.
+    ///
+    /// History: was 128K through v1.7.0. Bumped to 512K in v1.7.2 after
+    /// real-world skill-first dispatch tests (skill_search → call
+    /// sk_powerpoint → write .pptx → fs.stat verify) consistently hit the
+    /// 128K cap at iteration 8 with system prompt + skill content + tool
+    /// results compounding faster than the model can converge.
+    /// Override via `CYBERCLAW_MAX_TOTAL_TOKENS` env var (see [`Self::from_env_or_default`]).
     pub max_total_tokens: u64,
     /// How many recent iteration text-outputs to compare for repetition
     /// detection. Default: `3`. `0` disables gate 3.
@@ -87,7 +94,7 @@ impl Default for GovernorConfig {
     fn default() -> Self {
         Self {
             wall_clock_budget: Duration::from_secs(300),
-            max_total_tokens: 128_000,
+            max_total_tokens: 512_000,
             repetition_window: 3,
             repetition_similarity_threshold: 0.90,
             compress_threshold_chars: 40_000,
@@ -105,6 +112,26 @@ impl GovernorConfig {
             max_total_tokens: tokens,
             ..Self::default()
         }
+    }
+
+    /// Build a config seeded from `Default::default()` but with
+    /// `max_total_tokens` and `wall_clock_budget` overridable through
+    /// environment variables `CYBERCLAW_MAX_TOTAL_TOKENS` (u64) and
+    /// `CYBERCLAW_WALL_CLOCK_BUDGET_SECS` (u64). Invalid / missing values
+    /// fall back to the static default.
+    pub fn from_env_or_default() -> Self {
+        let mut cfg = Self::default();
+        if let Ok(s) = std::env::var("CYBERCLAW_MAX_TOTAL_TOKENS") {
+            if let Ok(n) = s.parse::<u64>() {
+                cfg.max_total_tokens = n;
+            }
+        }
+        if let Ok(s) = std::env::var("CYBERCLAW_WALL_CLOCK_BUDGET_SECS") {
+            if let Ok(n) = s.parse::<u64>() {
+                cfg.wall_clock_budget = Duration::from_secs(n);
+            }
+        }
+        cfg
     }
 }
 
@@ -694,16 +721,17 @@ mod tests {
     // -- v1.3 WP-2: single-tier defaults ----------------------------------
 
     #[test]
-    fn test_governor_default_uses_128k_tokens_300s_walls() {
-        // WP-2: post-tier-removal defaults must be the generous single-tier
-        // ceiling. 300s wall-clock and 128k tokens for every request.
+    fn test_governor_default_uses_512k_tokens_300s_walls() {
+        // v1.7.2: bumped from 128K to 512K after real-world skill-first
+        // dispatch test (sk_powerpoint multi-step exec) hit the 128K cap
+        // at iteration 8. Override via CYBERCLAW_MAX_TOTAL_TOKENS env.
         let cfg = GovernorConfig::default();
         assert_eq!(cfg.wall_clock_budget, Duration::from_secs(300));
-        assert_eq!(cfg.max_total_tokens, 128_000);
+        assert_eq!(cfg.max_total_tokens, 512_000);
 
         let gov = AgenticLoopGovernor::new(GovernorConfig::default());
         assert_eq!(gov.config().wall_clock_budget, Duration::from_secs(300));
-        assert_eq!(gov.config().max_total_tokens, 128_000);
+        assert_eq!(gov.config().max_total_tokens, 512_000);
     }
 
     #[test]

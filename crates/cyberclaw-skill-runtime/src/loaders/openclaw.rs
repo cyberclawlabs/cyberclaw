@@ -90,6 +90,7 @@ impl OpenClawSkillLoader {
             tools,
             scripts: manifest.skill.scripts,
             assets: manifest.skill.assets,
+            prompt_body: None,
             platforms: Vec::new(),
             triggers: Vec::new(),
             required_toolsets: Vec::new(),

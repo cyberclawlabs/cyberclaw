@@ -821,7 +821,7 @@ pub async fn agent_chat_completions(
         stuck_threshold: 3,
         tools,
         cache_system_prompt: cache_system_enabled,
-        per_tool_max_calls: 4,
+        per_tool_max_calls: std::env::var("CYBERCLAW_PER_TOOL_MAX_CALLS").ok().and_then(|s| s.parse().ok()).unwrap_or(12),
     };
 
     // --- MemoryIntegration (S1-T6) ---
@@ -908,7 +908,7 @@ pub async fn agent_chat_completions(
     // L1/L2/L3 keyword heuristic. 22 bug fixes against the tiered system
     // showed the abstraction never paid off; the LLM agent is responsible
     // for stopping early, the governor only enforces a hard cap.
-    let governor = AgenticLoopGovernor::new(GovernorConfig::default());
+    let governor = AgenticLoopGovernor::new(GovernorConfig::from_env_or_default());
 
     // Build the loop first so we can borrow its tool outcome ledger for
     // ToolFactVerifier. CodeBlockVerifier omitted — requires exec runtime
@@ -1380,7 +1380,7 @@ async fn agent_chat_completions_streaming(
         stuck_threshold: 3,
         tools,
         cache_system_prompt: cache_system_enabled,
-        per_tool_max_calls: 4,
+        per_tool_max_calls: std::env::var("CYBERCLAW_PER_TOOL_MAX_CALLS").ok().and_then(|s| s.parse().ok()).unwrap_or(12),
     };
 
     // --- MemoryIntegration ---
@@ -1433,7 +1433,7 @@ async fn agent_chat_completions_streaming(
     // BUG-CB-01 (2026-05-23): capture the wall-clock budget so the spawned
     // task can apply a hard outer timeout. v1.3 WP-2 collapsed the tiered
     // profile system, so we now read the single-tier default directly.
-    let governor_config = GovernorConfig::default();
+    let governor_config = GovernorConfig::from_env_or_default();
     let wall_clock_secs = governor_config.wall_clock_budget.as_secs();
     let governor = AgenticLoopGovernor::new(governor_config);
 

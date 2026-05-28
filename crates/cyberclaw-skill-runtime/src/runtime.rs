@@ -270,6 +270,7 @@ impl SkillRuntime for MinimalSkillRuntime {
                 tools: vec![],
                 scripts: vec![],
                 assets: vec![],
+                prompt_body: None,
                 platforms: vec![],
                 triggers: vec![],
                 required_toolsets: vec![],
@@ -283,9 +284,15 @@ impl SkillRuntime for MinimalSkillRuntime {
         let scripts = metadata.scripts.clone();
         let assets = metadata.assets.clone();
 
+        // v1.8 Bug D fix: 之前 prompt_extension 永远是空字符串 →
+        // LLM 看不到 SKILL.md body 的 actionable content. 现在从 metadata
+        // 取 loader 解析时填入的 prompt_body (Anthropic / hermes pattern).
+        // 见 docs/research/skill-md-body-pipeline-gap-2026-05-28.md
+        let prompt_extension = metadata.prompt_body.clone().unwrap_or_default();
+
         Some(SkillContext {
             metadata,
-            prompt_extension: String::new(),
+            prompt_extension,
             tool_declarations,
             references: vec![],
             scripts,
@@ -571,6 +578,7 @@ mod tests {
                     tools: vec![],
                     scripts: vec![],
                     assets: vec![],
+                    prompt_body: None,
                     platforms: vec![],
                     triggers: vec![],
                     required_toolsets: vec![],
@@ -610,6 +618,7 @@ mod tests {
                     tools: vec![],
                     scripts: vec![],
                     assets: vec![],
+                    prompt_body: None,
                     platforms: vec![],
                     triggers: vec![],
                     required_toolsets: vec![],

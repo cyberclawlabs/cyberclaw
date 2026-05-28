@@ -491,6 +491,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             handler: Arc::new(cyberclaw_skill_runtime::skills::EchoSkill),
             source_path: PathBuf::from("/test"),
@@ -545,6 +546,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             ..make_valid_skill_info("test")
         };
@@ -573,6 +575,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             ..make_valid_skill_info("test")
         };
@@ -602,6 +605,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             ..make_valid_skill_info("test")
         };
@@ -633,6 +637,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             ..make_valid_skill_info("test")
         };
@@ -662,6 +667,7 @@ mod tests {
                     required_toolsets: vec![],
                     source_ecosystem: None,
                     allowed_capabilities: vec![],
+                    prompt_body: None,
                 },
                 ..make_valid_skill_info("test")
             };
@@ -695,6 +701,7 @@ mod tests {
                     required_toolsets: vec![],
                     source_ecosystem: None,
                     allowed_capabilities: vec![],
+                    prompt_body: None,
                 },
                 ..make_valid_skill_info("test")
             };
@@ -730,6 +737,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             ..make_valid_skill_info("test")
         };
@@ -762,6 +770,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             ..make_valid_skill_info("test")
         };
@@ -790,6 +799,7 @@ mod tests {
                 required_toolsets: vec![],
                 source_ecosystem: None,
                 allowed_capabilities: vec![],
+                prompt_body: None,
             },
             ..make_valid_skill_info("test")
         };

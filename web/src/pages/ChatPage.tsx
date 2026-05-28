@@ -297,8 +297,15 @@ export default function ChatPage({ lang }: { lang: Lang }) {
     );
   }, []);
 
-  // 切换 active conv → 拉详情
+  // 切换 active conv → 拉详情 + 重置 per-conv UI 状态
+  // (v1.7.2 fix: sending / err / slashHint / compressing 都是 component-level
+  //  state, 之前没在 activeId 变化时 reset → 用户切换会话时上一 chat 的错误
+  //  toast + 停止按钮进度条会"跨会话残留", 看起来像 UI bug.)
   useEffect(() => {
+    setSending(false);
+    setErr(null);
+    setSlashHint(null);
+    setCompressing(false);
     if (!activeId) {
       setActive(null);
       return;
