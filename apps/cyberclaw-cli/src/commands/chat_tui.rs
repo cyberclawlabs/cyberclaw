@@ -483,12 +483,32 @@ impl<'a> TuiApp<'a> {
     }
 
     fn append_token(&mut self, token: &str) {
+        // token 只在活跃流式期间到达。
+        if !self.streaming {
+            return;
+        }
+
+        // 确保尾部是一个活跃的流式 assistant 块。工具标记 (push_system) 之后
+        // 尾块会变成非流式 system 块, 若直接累加, 工具轮之后的 assistant 文本
+        // 会落进错误的块 → 渲染出空气泡 (TUI-G2/M1/M2)。此时另起一个新的流式
+        // assistant 块, 让工具前文本 / 工具标记 / 工具后文本形成交错的气泡序列。
+        let needs_new_block = match self.history.last() {
+            Some(block) => !(block.role == "assistant" && block.streaming),
+            None => true,
+        };
+        if needs_new_block {
+            self.history.push(MessageBlock {
+                role: "assistant".to_string(),
+                content: String::new(),
+                ts: Utc::now(),
+                streaming: true,
+            });
+        }
+
         if let Some(block) = self.history.last_mut() {
-            if block.streaming {
-                block.content.push_str(token);
-                self.token_estimate += token.len() / 4 + 1;
-                self.scroll_to_bottom();
-            }
+            block.content.push_str(token);
+            self.token_estimate += token.len() / 4 + 1;
+            self.scroll_to_bottom();
         }
     }
 
@@ -2815,6 +2835,37 @@ mod tests {
             .find(|m| m.role == "user")
             .map(|m| m.content.clone());
         assert!(last_user.is_none());
+    }
+
+    #[test]
+    fn post_tool_assistant_text_is_rendered() {
+        // TUI-G2/M1/M2 回归: 工具调用轮之后, assistant 的最终文本必须仍落进
+        // 一个流式 assistant 块。修复前 push_system (工具标记) 在尾部留下一个
+        // 非流式 system 块, 工具轮之后的 token 被 append_token 静默丢弃 →
+        // 渲染出空的 ◆ assistant 气泡。
+        let mut app = fresh_app();
+        app.begin_assistant();
+        app.append_token("让我查一下记忆"); // 工具调用前的 assistant 文本
+        app.push_system("[tool: memory_read \u{2026}]".to_string());
+        app.push_system("[tool: memory_read \u{2713} 12ms]".to_string());
+        app.append_token("代号是 z858-quokka-velvet"); // 工具调用后的最终文本
+        app.finish_streaming();
+
+        let assistant_text: String = app
+            .history
+            .iter()
+            .filter(|b| b.role == "assistant")
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            assistant_text.contains("z858-quokka-velvet"),
+            "工具轮后的 assistant 文本必须进入 assistant 块; 实际 history: {:?}",
+            app.history
+                .iter()
+                .map(|b| (b.role.clone(), b.content.clone()))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

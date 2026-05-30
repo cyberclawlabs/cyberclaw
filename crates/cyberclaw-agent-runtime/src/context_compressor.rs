@@ -633,6 +633,16 @@ impl ContextCompressor {
 
     /// **Stage 1**: Prune old tool-result messages, keeping only the last
     /// `keep` tool results. System, user, and assistant messages are preserved.
+    ///
+    /// Pruning is *atomic with respect to tool-call pairing* (Bug G): when a
+    /// `Role::Tool` message is dropped, the matching `tool_calls` entry is also
+    /// removed from its owning assistant message. If an assistant's
+    /// `tool_calls` becomes empty and its `content` is empty, the assistant
+    /// message itself is dropped; otherwise the content is kept with
+    /// `tool_calls` set to `None`. This guarantees the output never contains an
+    /// orphan tool result (a `tool_call_id` not referenced by any surviving
+    /// assistant `tool_calls`) — the condition MiniMax rejects with
+    /// "tool result's tool id not found".
     pub fn prune_tool_results(&self, messages: &[Message], keep: usize) -> Vec<Message> {
         // Find indices of all Tool-role messages.
         let tool_indices: Vec<usize> = messages
@@ -651,12 +661,45 @@ impl ContextCompressor {
         let remove_set: std::collections::HashSet<usize> =
             tool_indices[..remove_count].iter().copied().collect();
 
-        messages
+        // Collect the tool_call_ids of the tool results we are removing, so we
+        // can strip the matching tool_calls entries from assistant messages.
+        let removed_call_ids: std::collections::HashSet<String> = remove_set
             .iter()
-            .enumerate()
-            .filter(|(i, _)| !remove_set.contains(i))
-            .map(|(_, m)| m.clone())
-            .collect()
+            .filter_map(|&i| messages[i].tool_call_id.clone())
+            .collect();
+
+        let mut result = Vec::with_capacity(messages.len() - remove_count);
+        for (i, m) in messages.iter().enumerate() {
+            if remove_set.contains(&i) {
+                continue;
+            }
+
+            // For assistant messages with tool_calls, drop any tool_calls whose
+            // result was pruned, keeping pairing atomic.
+            if m.role == Role::Assistant {
+                if let Some(calls) = &m.tool_calls {
+                    let kept: Vec<_> = calls
+                        .iter()
+                        .filter(|tc| !removed_call_ids.contains(&tc.id))
+                        .cloned()
+                        .collect();
+                    if kept.len() != calls.len() {
+                        if kept.is_empty() && m.content.trim().is_empty() {
+                            // No surviving calls and no content → drop entirely.
+                            continue;
+                        }
+                        let mut cloned = m.clone();
+                        cloned.tool_calls = if kept.is_empty() { None } else { Some(kept) };
+                        result.push(cloned);
+                        continue;
+                    }
+                }
+            }
+
+            result.push(m.clone());
+        }
+
+        result
     }
 
     /// **Stage 2** (sync): deterministic 120-char-per-message summarization.
@@ -721,13 +764,44 @@ impl ContextCompressor {
             summary_parts.join("\n")
         );
 
-        let mut result = Vec::with_capacity(2 + keep_tail);
+        Self::build_summarized_result(messages, early_start, early_end, keep_tail, summary_text)
+    }
+
+    /// 组装 SummarizeEarly 的结果列表，保留原始 user 任务消息。
+    ///
+    /// 结构: `[system[0]?, 保留的首条 user?, summary_system, ...tail]`。
+    ///
+    /// **根本修复 (Bug I-d 类)**: 早先压缩会把 early 区里的原始 user turn
+    /// 一并折进 summary，多轮工具任务的 tail 半段又全是 assistant(tool_use)/
+    /// tool(result) 对 → 压缩后 live 窗口**没有任何 user 消息**。这让对话不以
+    /// 可应答的 user turn 锚定: generic provider 上 MiniMax 返空 200，anthropic
+    /// provider 上 (Anthropic 要求 messages 首条为 user) MiniMax shim 报
+    /// 500 "input json is empty"。此处在压缩根部保留 early 区第一条 user
+    /// (原始任务)，既维持 user 锚点又保留任务上下文 (provider 侧 ensure_user
+    /// 兜底降级为冗余防线)。
+    fn build_summarized_result(
+        messages: &[Message],
+        early_start: usize,
+        early_end: usize,
+        keep_tail: usize,
+        summary_text: String,
+    ) -> Vec<Message> {
+        let mut result = Vec::with_capacity(3 + keep_tail);
         if early_start == 1 {
             result.push(messages[0].clone());
         }
+        // 保留 early 区第一条 user 消息 (原始任务)，防止压缩后 live 窗口无 user。
+        if let Some(user_msg) = messages[early_start..early_end]
+            .iter()
+            .find(|m| m.role == Role::User)
+        {
+            result.push(user_msg.clone());
+        }
         result.push(Message::system(summary_text));
         result.extend_from_slice(&messages[messages.len() - keep_tail..]);
-        result
+        // Bug I: folding early turns into the summary can orphan a tool result
+        // whose owning assistant was folded away. Drop any such orphans.
+        Self::drop_orphan_tool_results(result)
     }
 
     /// **Stage 2** (async inner): calls the injected [`ContextSummarizer`],
@@ -777,17 +851,18 @@ impl ContextCompressor {
                         // Update the iterative-merge state.
                         self.previous_summary = Some(summary_text.clone());
 
-                        let mut result = Vec::with_capacity(2 + keep_tail);
-                        if early_start == 1 {
-                            result.push(messages[0].clone());
-                        }
-                        result.push(Message::system(format!(
+                        let summary = format!(
                             "[Context summary of {} earlier messages]\n{}",
                             early_end - early_start,
                             summary_text
-                        )));
-                        result.extend_from_slice(&messages[messages.len() - keep_tail..]);
-                        return result;
+                        );
+                        return Self::build_summarized_result(
+                            messages,
+                            early_start,
+                            early_end,
+                            keep_tail,
+                            summary,
+                        );
                     }
                     Err(err) => {
                         // LLM summarizer failed — log and fall through to deterministic.
@@ -851,7 +926,7 @@ impl ContextCompressor {
             .map(|m| m.role == Role::System)
             .unwrap_or(false);
 
-        if has_system && size >= 2 {
+        let windowed = if has_system && size >= 2 {
             let mut result = Vec::with_capacity(size);
             result.push(messages[0].clone());
             let tail_count = size - 1;
@@ -861,7 +936,107 @@ impl ContextCompressor {
         } else {
             let start = messages.len().saturating_sub(size);
             messages[start..].to_vec()
+        };
+
+        Self::drop_leading_orphan_tool_results(windowed)
+    }
+
+    /// Drop leading `Role::Tool` messages whose `tool_call_id` is not referenced
+    /// by any surviving assistant `tool_calls` (Bug G).
+    ///
+    /// Hard truncation can slice off an assistant-with-tool_calls while keeping
+    /// a following tool result, leaving an orphan that MiniMax rejects. We only
+    /// strip *leading* orphans: a tool result that appears after its owning
+    /// assistant message is, by construction, still paired.
+    fn drop_leading_orphan_tool_results(messages: Vec<Message>) -> Vec<Message> {
+        let call_ids: std::collections::HashSet<String> = messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .map(|tc| tc.id.clone())
+            .collect();
+
+        // A leading system prompt is preserved verbatim by the window; skip
+        // past it before scanning for orphan tool results.
+        let system_offset = usize::from(
+            messages
+                .first()
+                .map(|m| m.role == Role::System)
+                .unwrap_or(false),
+        );
+
+        let mut orphan_indices = Vec::new();
+        for (i, m) in messages.iter().enumerate().skip(system_offset) {
+            if m.role == Role::Tool {
+                let paired = m
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| call_ids.contains(id));
+                if !paired {
+                    orphan_indices.push(i);
+                    continue;
+                }
+            }
+            // Stop at the first non-orphan message: once we hit an assistant /
+            // user / paired tool message the remaining tool results are paired.
+            break;
         }
+
+        if orphan_indices.is_empty() {
+            return messages;
+        }
+        let drop: std::collections::HashSet<usize> = orphan_indices.into_iter().collect();
+        messages
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !drop.contains(i))
+            .map(|(_, m)| m)
+            .collect()
+    }
+
+    /// Drop *any* `Role::Tool` message whose `tool_call_id` is not referenced
+    /// by a surviving assistant `tool_calls` entry (Bug I).
+    ///
+    /// Unlike [`Self::drop_leading_orphan_tool_results`], which only strips
+    /// orphans at the front of the window (relying on positional pairing), this
+    /// scans the entire list. `SummarizeEarly` folds a contiguous span of early
+    /// turns into one summary message, so an assistant-with-tool_calls can be
+    /// folded away while its tool result remains in the preserved tail — the
+    /// orphan can therefore appear anywhere after the summary, not just at the
+    /// leading edge. Removing every unpaired tool result restores the invariant
+    /// MiniMax requires.
+    fn drop_orphan_tool_results(messages: Vec<Message>) -> Vec<Message> {
+        let call_ids: std::collections::HashSet<String> = messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .map(|tc| tc.id.clone())
+            .collect();
+
+        let has_orphan = messages.iter().any(|m| {
+            m.role == Role::Tool
+                && !m
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| call_ids.contains(id))
+        });
+        if !has_orphan {
+            return messages;
+        }
+
+        messages
+            .into_iter()
+            .filter(|m| {
+                if m.role != Role::Tool {
+                    return true;
+                }
+                m.tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| call_ids.contains(id))
+            })
+            .collect()
     }
 
     /// Record an external compression failure (e.g. an LLM summary call that
@@ -984,6 +1159,56 @@ mod tests {
         msgs
     }
 
+    /// Build a `ToolCall` with the given id (function name/args are irrelevant
+    /// for pairing tests).
+    fn tool_call(id: &str) -> cyberclaw_llm::types::ToolCall {
+        cyberclaw_llm::types::ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: cyberclaw_llm::types::FunctionCall {
+                name: "noop".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    /// Invariant: every surviving `Role::Tool` message's `tool_call_id` must be
+    /// referenced by some surviving assistant message's `tool_calls`, and every
+    /// surviving assistant `tool_calls` id should have a matching tool result
+    /// (no orphan call). This is the contract MiniMax enforces.
+    fn assert_tool_pairing_intact(messages: &[Message]) {
+        use std::collections::HashSet;
+
+        let call_ids: HashSet<&str> = messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .map(|tc| tc.id.as_str())
+            .collect();
+
+        let result_ids: HashSet<&str> = messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+
+        // Orphan tool result: result id with no matching assistant tool_call.
+        for rid in &result_ids {
+            assert!(
+                call_ids.contains(rid),
+                "orphan tool result: id {rid:?} has no matching assistant tool_call"
+            );
+        }
+        // Orphan tool call: assistant tool_call id with no matching tool result.
+        for cid in &call_ids {
+            assert!(
+                result_ids.contains(cid),
+                "orphan tool call: id {cid:?} has no matching tool result"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Gap 1.1 new tests
     // -----------------------------------------------------------------------
@@ -1103,6 +1328,36 @@ mod tests {
         );
     }
 
+    /// 根本修复 (Bug I-d 类): SummarizeEarly 压缩后, 原始 user 任务消息必须
+    /// 仍以 user 角色保留在结果里 — 否则多工具任务的 tail 全是 assistant/tool
+    /// 对、压缩后 live 窗口无 user, 触发 provider 侧空响应/500。
+    #[test]
+    fn test_summarize_early_preserves_original_user_message() {
+        let compressor = ContextCompressor::new(Default::default());
+        // [system, user(任务), assistant×6] — len=8, tail 半段全是 assistant 无 user。
+        let mut msgs = vec![
+            Message::system("You are an agent."),
+            Message::user("生成 6 页 pptx 介绍 CyberClaw"),
+        ];
+        for i in 0..6 {
+            msgs.push(Message::assistant(format!("step {i}")));
+        }
+
+        let result = compressor.summarize_early(&msgs, 500);
+
+        // 压缩后仍必须存在至少一条 user 角色消息 (原始任务)。
+        let user_msg = result.iter().find(|m| m.role == Role::User);
+        assert!(
+            user_msg.is_some(),
+            "压缩后 live 窗口必须保留 user 消息; 实际角色: {:?}",
+            result.iter().map(|m| &m.role).collect::<Vec<_>>()
+        );
+        assert!(
+            user_msg.unwrap().content.contains("生成 6 页 pptx"),
+            "保留的 user 应是原始任务内容"
+        );
+    }
+
     /// 5. After a successful async compression the compressor updates
     ///    `previous_summary` so the next call can merge.
     #[tokio::test]
@@ -1173,6 +1428,109 @@ mod tests {
 
         let non_tool_count = pruned.iter().filter(|m| m.role != Role::Tool).count();
         assert_eq!(non_tool_count, 6);
+    }
+
+    /// Bug G: pruning a tool result must atomically remove the corresponding
+    /// `tool_calls` entry from its assistant message, never leaving an orphan
+    /// tool result (or an orphan tool call). MiniMax rejects a request when a
+    /// tool result's id is not found in any assistant `tool_calls`.
+    #[test]
+    fn prune_keeps_tool_call_result_pairs_atomic() {
+        let compressor = ContextCompressor::new(Default::default());
+
+        let messages = vec![
+            Message::user("Do A and B"),
+            Message::assistant_with_tools("calling A and B", vec![tool_call("A"), tool_call("B")]),
+            Message::tool("A".into(), "result A"),
+            Message::tool("B".into(), "result B"),
+        ];
+
+        // keep = 1 → the older tool result (A) must be dropped, and its
+        // matching assistant tool_call must be dropped too.
+        let pruned = compressor.prune_tool_results(&messages, 1);
+
+        assert_tool_pairing_intact(&pruned);
+
+        // B's result survives, A's result is gone.
+        let surviving_results: Vec<&str> = pruned
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert_eq!(surviving_results, vec!["B"]);
+    }
+
+    /// Bug G branch (c): when *all* tool_calls of an assistant message are
+    /// pruned but the assistant has non-empty content, the assistant message
+    /// must survive with its content intact and `tool_calls` set to `None`.
+    #[test]
+    fn prune_retains_assistant_content_when_all_tool_calls_pruned() {
+        let compressor = ContextCompressor::new(Default::default());
+
+        let messages = vec![
+            Message::user("Do something"),
+            Message::assistant_with_tools("思考中...", vec![tool_call("A")]),
+            Message::tool("A".into(), "result A"),
+        ];
+
+        // keep = 0 → result A is pruned, so tool_call A must be removed from
+        // the assistant. But the assistant has content "思考中..." so it must
+        // NOT be dropped — only its tool_calls should become None.
+        let pruned = compressor.prune_tool_results(&messages, 0);
+
+        // Pairing invariant: no orphan result, no orphan call.
+        assert_tool_pairing_intact(&pruned);
+
+        // The assistant message must still be present.
+        let assistant = pruned.iter().find(|m| m.role == Role::Assistant);
+        assert!(assistant.is_some(), "assistant message was dropped unexpectedly");
+        let assistant = assistant.unwrap();
+
+        // Content preserved.
+        assert_eq!(assistant.content, "思考中...");
+
+        // tool_calls cleared.
+        assert!(
+            assistant.tool_calls.is_none()
+                || assistant.tool_calls.as_ref().is_some_and(|v| v.is_empty()),
+            "tool_calls should be None after all calls are pruned"
+        );
+
+        // The tool result is gone.
+        assert!(
+            !pruned.iter().any(|m| m.role == Role::Tool),
+            "tool result A should have been pruned"
+        );
+    }
+
+    /// Bug G: sliding-window truncation that slices off an
+    /// assistant-with-tool_calls but keeps a following tool result must drop
+    /// the now-orphaned leading tool result.
+    #[test]
+    fn sliding_window_drops_orphan_leading_tool_results() {
+        let compressor = ContextCompressor::new(Default::default());
+
+        let messages = vec![
+            Message::user("start"),
+            Message::assistant_with_tools("call A", vec![tool_call("A")]),
+            Message::tool("A".into(), "result A"),
+            Message::assistant_with_tools("call B", vec![tool_call("B")]),
+            Message::tool("B".into(), "result B"),
+            Message::user("more"),
+        ];
+
+        // size = 4 keeps the last 4: [tool(A), assistant(B), tool(B), user] —
+        // tool(A) is now an orphan (its assistant call at index 1 was sliced
+        // off). The window must drop the leading orphan tool result.
+        let windowed = compressor.sliding_window(&messages, 4);
+        assert_tool_pairing_intact(&windowed);
+        // The orphan tool(A) must not survive.
+        assert!(
+            !windowed
+                .iter()
+                .any(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("A")),
+            "orphan leading tool result A should have been dropped"
+        );
     }
 
     #[test]
@@ -1375,8 +1733,100 @@ mod tests {
         assert!(result.len() < messages.len());
         assert_eq!(result[0].role, Role::System);
         assert_eq!(result[0].content, "System prompt");
-        assert_eq!(result[1].role, Role::System);
-        assert!(result[1].content.contains("[Context summary"));
+        // 根本修复 (Bug I-d 类): 原始 user 任务保留在 summary 之前, 确保
+        // 压缩后 live 窗口仍以可应答的 user turn 锚定。
+        assert_eq!(result[1].role, Role::User);
+        assert!(result[1].content.contains("User message 0"));
+        assert_eq!(result[2].role, Role::System);
+        assert!(result[2].content.contains("[Context summary"));
+    }
+
+    /// Bug I: `SummarizeEarly` folds early turns into a single summary
+    /// message. If a folded assistant message owned a `tool_calls` entry whose
+    /// `Role::Tool` result lands in the preserved tail (or vice versa), the
+    /// surviving tool result becomes an orphan — its `tool_call_id` is no
+    /// longer referenced by any surviving assistant. MiniMax rejects this with
+    /// "tool result's tool id not found". The summarize stage output must run
+    /// the same full-list pairing cleanup as the other stages.
+    #[tokio::test]
+    async fn summarize_early_drops_orphan_tool_results() {
+        // 14 messages: system + 13 turns. keep_tail = 14/2 = 7, so the early
+        // slice is [1..7) (indices 1-6) and the preserved tail is indices
+        // 7..14 (the last 7 messages). We place an assistant-with-tool_calls at
+        // index 6 (gets folded into the summary) and its matching tool result
+        // at index 7 (survives in the tail) → orphan after folding.
+        let mut msgs = vec![Message::system("System prompt")];
+        // indices 1..=5: filler turns that get folded.
+        for i in 0..5 {
+            msgs.push(Message::user(format!("User {i}")));
+        }
+        // index 6: assistant with tool_call "X" — folded into the summary.
+        msgs.push(Message::assistant_with_tools(
+            "calling X",
+            vec![tool_call("X")],
+        ));
+        // index 7: tool result for "X" — survives in the tail → orphan.
+        msgs.push(Message::tool("X".into(), "result X"));
+        // indices 8..=13: more tail filler so keep_tail keeps index 7 in tail.
+        for i in 0..6 {
+            msgs.push(Message::user(format!("Tail {i}")));
+        }
+        assert_eq!(msgs.len(), 14);
+        // Sanity: index 6 (the assistant) is folded (< early_end = 14-7 = 7),
+        // index 7 (the tool result) is in the preserved tail.
+
+        let (_, mock) = MockSummarizer::succeeds("LLM summary text");
+        let mut compressor = ContextCompressor::new(CompressionConfig {
+            // Disable other stages' interference: keep enough tool results so
+            // PruneToolResults is a no-op, and a window large enough to not
+            // truncate.
+            tool_result_keep_count: 100,
+            sliding_window_size: 100,
+            ..Default::default()
+        })
+        .with_summarizer(Arc::new(mock));
+
+        let result = compressor.compress_all_async(&msgs).await;
+
+        // The orphan tool result "X" must not survive — pairing intact.
+        assert_tool_pairing_intact(&result.messages);
+        assert!(
+            !result
+                .messages
+                .iter()
+                .any(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("X")),
+            "orphan tool result X should have been dropped after SummarizeEarly folding"
+        );
+    }
+
+    /// Bug I (sync path): the deterministic `summarize_early` must also drop
+    /// orphan tool results produced by folding.
+    #[test]
+    fn summarize_early_sync_drops_orphan_tool_results() {
+        let mut msgs = vec![Message::system("System prompt")];
+        for i in 0..5 {
+            msgs.push(Message::user(format!("User {i}")));
+        }
+        msgs.push(Message::assistant_with_tools(
+            "calling X",
+            vec![tool_call("X")],
+        ));
+        msgs.push(Message::tool("X".into(), "result X"));
+        for i in 0..6 {
+            msgs.push(Message::user(format!("Tail {i}")));
+        }
+        assert_eq!(msgs.len(), 14);
+
+        let compressor = ContextCompressor::new(Default::default());
+        let result = compressor.summarize_early(&msgs, 500);
+
+        assert_tool_pairing_intact(&result);
+        assert!(
+            !result
+                .iter()
+                .any(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("X")),
+            "orphan tool result X should have been dropped after SummarizeEarly folding (sync)"
+        );
     }
 
     #[test]

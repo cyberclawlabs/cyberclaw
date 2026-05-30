@@ -380,6 +380,25 @@ mod tests {
     use std::os::unix::fs as unix_fs;
     use tempfile::TempDir;
 
+    /// Create a TempDir that is guaranteed to live outside any protected system
+    /// directory (see `DEFAULT_SYSTEM_PATHS`).
+    ///
+    /// The default `$TMPDIR` on macOS/CI resolves to `/private/tmp/...`, which is
+    /// blocked by the `/tmp` protection rule, and the project tree lives under
+    /// `/Users`, which is also protected. `/var/tmp` (canonical `/private/var/tmp`)
+    /// is writable and matches none of the protected prefixes, so workspaces
+    /// created there exercise the "legal workspace" paths correctly.
+    fn test_ws() -> TempDir {
+        #[cfg(unix)]
+        {
+            TempDir::new_in("/var/tmp").unwrap()
+        }
+        #[cfg(not(unix))]
+        {
+            TempDir::new().unwrap()
+        }
+    }
+
     #[test]
     fn test_workspace_creation() {
         let temp = TempDir::new().unwrap();
@@ -442,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_workspace_boundary() {
-        let temp = TempDir::new().unwrap();
+        let temp = test_ws();
         let workspace = AutopilotWorkspace::new(temp.path()).unwrap();
 
         // Create a file in workspace
@@ -462,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_hidden_files_policy() {
-        let temp = TempDir::new().unwrap();
+        let temp = test_ws();
 
         // Default: hidden files blocked (use absolute path)
         let workspace = AutopilotWorkspace::new(temp.path()).unwrap();
@@ -481,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_extension_whitelist() {
-        let temp = TempDir::new().unwrap();
+        let temp = test_ws();
         let workspace = AutopilotWorkspace::new(temp.path())
             .unwrap()
             .with_extensions(vec!["rs", "toml", "md"]);
@@ -508,7 +527,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_symlink_handling() {
-        let temp = TempDir::new().unwrap();
+        let temp = test_ws();
         let workspace = AutopilotWorkspace::new(temp.path()).unwrap();
 
         // Create a file and symlink within workspace
@@ -563,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_safe_nested_paths() {
-        let temp = TempDir::new().unwrap();
+        let temp = test_ws();
         let workspace = AutopilotWorkspace::new(temp.path()).unwrap();
 
         // Create nested directory structure
@@ -579,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_would_allow() {
-        let temp = TempDir::new().unwrap();
+        let temp = test_ws();
         let workspace = AutopilotWorkspace::new(temp.path()).unwrap();
 
         // Test non-destructive checking (use absolute paths)

@@ -93,7 +93,7 @@ pub struct GovernorConfig {
 impl Default for GovernorConfig {
     fn default() -> Self {
         Self {
-            wall_clock_budget: Duration::from_secs(300),
+            wall_clock_budget: Duration::from_secs(600),
             max_total_tokens: 512_000,
             repetition_window: 3,
             repetition_similarity_threshold: 0.90,
@@ -721,16 +721,20 @@ mod tests {
     // -- v1.3 WP-2: single-tier defaults ----------------------------------
 
     #[test]
-    fn test_governor_default_uses_512k_tokens_300s_walls() {
-        // v1.7.2: bumped from 128K to 512K after real-world skill-first
-        // dispatch test (sk_powerpoint multi-step exec) hit the 128K cap
-        // at iteration 8. Override via CYBERCLAW_MAX_TOTAL_TOKENS env.
+    fn test_governor_default_uses_512k_tokens_600s_walls() {
+        // v1.7.2: bumped tokens 128K → 512K after sk_powerpoint multi-step
+        // exec hit the 128K cap at iteration 8.
+        // v1.8: bumped wall-clock 300s → 600s after the real PPT acceptance
+        // task (multi-tool: skill_search → fs.read docs → container python-pptx)
+        // took 304s and hit the 300s wall just as the artifact finished.
+        // Multi-tool artifact tasks need headroom. Override via
+        // CYBERCLAW_WALL_CLOCK_BUDGET_SECS / CYBERCLAW_MAX_TOTAL_TOKENS env.
         let cfg = GovernorConfig::default();
-        assert_eq!(cfg.wall_clock_budget, Duration::from_secs(300));
+        assert_eq!(cfg.wall_clock_budget, Duration::from_secs(600));
         assert_eq!(cfg.max_total_tokens, 512_000);
 
         let gov = AgenticLoopGovernor::new(GovernorConfig::default());
-        assert_eq!(gov.config().wall_clock_budget, Duration::from_secs(300));
+        assert_eq!(gov.config().wall_clock_budget, Duration::from_secs(600));
         assert_eq!(gov.config().max_total_tokens, 512_000);
     }
 

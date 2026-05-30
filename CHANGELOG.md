@@ -5,6 +5,37 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) fo
 
 ---
 
+## [v1.8.0] — 2026-05-30
+
+Anthropic-compatible providers now support the full agentic loop — tool calling and live streaming — plus reliability fixes for long multi-tool tasks, the terminal UI, and container runtime detection. Rolls up the v1.7.x reliability patch.
+
+### What's new for users
+
+- **Anthropic-compatible provider — tool calling.** Providers configured with `LLM_PROVIDER=anthropic` (Anthropic Claude and Anthropic-compatible Messages-API endpoints) now support function/tool calling end-to-end. Previously the Anthropic client could chat but could not execute tools, so agentic tasks (write a file, run a command, query memory) silently produced no result. Tool requests and results now round-trip correctly (`tool_use` / `tool_result`).
+- **Anthropic-compatible provider — streaming.** `chat_completion_stream` is now implemented for the Anthropic Messages API (SSE). The terminal UI and Admin Console stream tokens live for these providers instead of waiting for a buffered response.
+- **Long multi-tool tasks survive context compression.** When a conversation grows large enough to trigger summarization, the original user request is now preserved in the live window. Previously, compression could fold the user's task into the summary and leave no user message in the active turn — after which some providers returned an empty or error response, stalling long tasks (e.g. generating a multi-slide deck). The fix lives in the context compressor, so every provider benefits.
+- **Terminal UI renders replies that follow a tool call.** After a tool runs, the assistant's final answer now displays correctly. Previously the assistant bubble could appear empty when the reply arrived after an inline `[tool: …]` marker.
+- **Container runtime detection is daemon-aware.** Execution is routed to a container runtime only when its daemon is actually reachable (probed via `docker info` / `podman info`), rather than merely detecting the client binary. On hosts with the Docker/Podman CLI installed but the daemon stopped, execution now correctly falls back to native process execution instead of failing.
+
+### Quality gates
+
+- `cargo build --release --workspace`: clean (0 warnings).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo test --workspace --lib`: pass / 0 fail.
+- `npm --prefix web run typecheck`: clean.
+
+### Migration
+
+- No API changes — drop-in upgrade.
+- The Anthropic-compatible provider gains tool calling + streaming; OpenAI / Generic / ARK provider behavior is unchanged.
+- Includes the v1.7.x reliability hardening (per-turn response check, cross-turn recall reflex, more generous token budget defaults).
+
+### Notes
+
+- The Anthropic Messages API requires a conversation to begin with a user message. CyberClaw now guarantees this automatically — even after aggressive context compression — so multi-tool agentic loops on Anthropic-compatible endpoints stay valid.
+
+---
+
 ## [v1.7.1] — 2026-05-27
 
 Reliability + observability hardening on top of v1.3.0. Sustained-load tested, release-profile tuned, additional per-turn safeguards against the most common chat-time failure modes.

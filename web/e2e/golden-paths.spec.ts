@@ -135,4 +135,25 @@ test.describe('CyberClaw WebUI v1.0-GA golden paths', () => {
     });
     expect(sessions.status()).toBeLessThan(500);
   });
+
+  // v1.8 Bug A: WebUI chat now targets /v2/agent/chat/completions (skill-first
+  // constitution + IRON LAWs + server-held conversation). The v2 contract is
+  // identified by the X-Conversation-Id response header, which the legacy
+  // /v1/chat/completions path does not emit.
+  test('GP8 webui chat uses v2 agent path (X-Conversation-Id present)', async ({ baseURL, request: req }) => {
+    const jwt = await getJwt(baseURL!);
+    // Non-streaming probe of the same endpoint streamChatCompletion targets.
+    const resp = await req.post(`${baseURL}/v2/agent/chat/completions`, {
+      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      data: { message: 'ping', stream: false },
+      timeout: 120_000,
+    });
+    // 200 on success; the route MUST exist (not 404) and must carry the v2
+    // conversation header regardless of LLM outcome.
+    expect(resp.status(), `v2 chat route reachable (got ${resp.status()})`).toBeLessThan(500);
+    expect(
+      resp.headers()['x-conversation-id'],
+      'v2 endpoint echoes X-Conversation-Id (v1 does not)',
+    ).toBeTruthy();
+  });
 });

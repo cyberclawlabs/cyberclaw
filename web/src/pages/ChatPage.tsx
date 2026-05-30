@@ -283,6 +283,10 @@ export default function ChatPage({ lang }: { lang: Lang }) {
   const [err, setErr] = useState<string | null>(null);
   const [slashHint, setSlashHint] = useState<string | null>(null);
   const [compressing, setCompressing] = useState(false);
+  // Bug J: 会话列表走旧 /api/v1（conv_ 格式 id），但 /v2/agent/chat/completions
+  // 校验 conversation_id 要 UUID。首轮以 conv_ 为 key 不带 id 发 v2，服务端新建
+  // 并在 X-Conversation-Id 回 UUID，存这里；后续轮用 UUID 续传同一服务端 session。
+  const [convV2IdMap, setConvV2IdMap] = useState<Record<string, string>>({});
   const abortRef = useRef<AbortController | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
@@ -353,6 +357,13 @@ export default function ChatPage({ lang }: { lang: Lang }) {
     try {
       await deleteConversation(id);
       setConvs((prev) => prev.filter((c) => c.id !== id));
+      // Bug J: 丢弃该 conv_ 的 v2 UUID 映射，避免 id 复用时续到旧 session。
+      setConvV2IdMap((m) => {
+        if (!m[id]) return m;
+        const next = { ...m };
+        delete next[id];
+        return next;
+      });
       if (activeId === id) setActiveId(null);
     } catch (e: unknown) {
       const eobj = e as { status?: number; body?: string };
@@ -409,10 +420,19 @@ export default function ChatPage({ lang }: { lang: Lang }) {
     // optimistic UI
     const userMsg: ChatMessage = { role: "user", content: text };
     const assistantMsg: ChatMessage = { role: "assistant", content: "" };
+    // Bug J: 点「+ 新建对话」后 activeId 立即就绪（textarea enabled），但
+    // fetchConversation 可能尚未返回 → active 仍为 null。旧逻辑 `cur ? … : cur`
+    // 在 cur=null 时丢弃这两条消息，随后 onToken 也因 `!cur` 直接 return，
+    // 导致 v2 token 永不渲染（webui 看起来"没回复"）。这里在 cur=null 时合成
+    // 一个最小会话容器，保证 optimistic 气泡与流式渲染不依赖加载时序。
     setActive((cur) =>
       cur
         ? { ...cur, messages: [...(cur.messages ?? []), userMsg, assistantMsg] }
-        : cur,
+        : {
+            id: activeId,
+            title: convs.find((c) => c.id === activeId)?.title ?? "",
+            messages: [userMsg, assistantMsg],
+          },
     );
 
     const ac = new AbortController();
@@ -436,11 +456,20 @@ export default function ChatPage({ lang }: { lang: Lang }) {
         }
       });
 
+      // Bug J: 优先用已映射的 v2 UUID。首轮还没映射时传 activeId（conv_ 或本就
+      // 是 UUID）——streamChatCompletion 内部判定 conv_ 不透传给 v2，改由服务端
+      // 新建并经 onConversationId 回 UUID 存入 convV2IdMap，后续轮即命中映射。
+      const v2ConvId = convV2IdMap[activeId] ?? activeId;
       await streamChatCompletion({
-        conversationId: activeId,
+        conversationId: v2ConvId,
         model,
         messages: [...(active?.messages ?? []), userMsg],
         signal: ac.signal,
+        onConversationId: (uuid) => {
+          if (!convV2IdMap[activeId]) {
+            setConvV2IdMap((m) => (m[activeId] ? m : { ...m, [activeId]: uuid }));
+          }
+        },
         onToken: (chunk) => {
           collected += chunk;
           setActive((cur) => {

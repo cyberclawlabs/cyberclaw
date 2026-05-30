@@ -46,8 +46,8 @@ impl ModelsCatalog {
     /// 不预填其他 provider 的模型，避免 dropdown 显示 server 实际无法调用的条目。
     /// 用户可在 Models 页手动 add 其他模型。
     fn seed() -> Self {
-        let default_model =
-            std::env::var("LLM_DEFAULT_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
+        let default_model = std::env::var("LLM_DEFAULT_MODEL")
+            .unwrap_or_else(|_| "MiniMax-M2.7-HighSpeed".to_string());
         let provider = std::env::var("LLM_PROVIDER").ok();
         Self {
             current_default: default_model.clone(),

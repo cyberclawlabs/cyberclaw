@@ -118,3 +118,4 @@ uploads/
 
 # Playwright debugging screenshots
 web/playwright-screenshots/
+.venv/

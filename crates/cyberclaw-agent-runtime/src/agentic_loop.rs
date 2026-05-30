@@ -26,6 +26,127 @@ use crate::loop_governor::{AgenticLoopGovernor, LoopCtx, LoopDecision};
 use crate::verify::{VerificationDirective, VerifierChain, VerifyCtx};
 
 // ---------------------------------------------------------------------------
+// Bug H — tool_call arguments JSON normalization
+// ---------------------------------------------------------------------------
+
+/// Normalize a single `tool_call.function.arguments` payload into a compact,
+/// strictly-valid JSON object string.
+///
+/// MiniMax (and other strict providers) re-validate every
+/// `assistant.tool_calls[].function.arguments` string on each outbound replay
+/// of the conversation history. If the model emitted arguments that are not
+/// valid JSON (e.g. a multi-line python script with raw newlines, or single
+/// quotes, or an empty string), the whole conversation gets rejected with
+/// `400 invalid function arguments json string`. To prevent a malformed
+/// payload from ever entering the history we normalize before pushing.
+///
+/// Strategy:
+/// 1. Parse as-is — if it already parses, re-serialize compactly and keep it.
+/// 2. Empty / "null" → `{}`.
+/// 3. Escape raw control characters (newline / tab / carriage-return) that
+///    appear inside JSON, then retry.
+/// 4. Still invalid → degrade to `{}` (better an empty arg than a 400 that
+///    bricks the entire conversation).
+fn normalize_arguments_json(raw: &str) -> String {
+    // Step 1: already valid JSON → re-serialize compactly. A bare JSON
+    // `null` is technically valid but is not a usable arguments object, so
+    // collapse it to an empty object (providers expect an object literal).
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        if value.is_null() {
+            return "{}".to_string();
+        }
+        return serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
+    }
+
+    // Step 2: empty string → empty object.
+    if raw.trim().is_empty() {
+        return "{}".to_string();
+    }
+
+    // Step 3: escape all raw control characters (<0x20) inside JSON string
+    // literals — RFC 8259 forbids any unescaped control character in a JSON
+    // string, not just \n/\r/\t. Common offenders in multi-line script payloads:
+    // form feed (0x0C), vertical tab (0x0B), backspace (0x08). Existing
+    // backslash escapes are left intact (a payload with only those would have
+    // parsed already in step 1).
+    if let Some(repaired) = try_escape_control_chars(raw) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&repaired) {
+            return serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
+        }
+    }
+
+    // Step 4: unrecoverable → degrade to empty object so the history stays
+    // valid and the provider does not reject the entire conversation.
+    tracing::warn!(
+        raw_len = raw.len(),
+        "normalize_arguments_json: tool_call arguments not valid JSON and \
+         not repairable — degrading to {{}} to avoid provider 400"
+    );
+    "{}".to_string()
+}
+
+/// Replace all control characters (<0x20) that appear inside JSON string
+/// literals with their RFC 8259-compliant escaped equivalents. `\n`, `\r`,
+/// and `\t` use short escapes; all other control characters (form feed 0x0C,
+/// vertical tab 0x0B, backspace 0x08, NUL, etc.) use `\uXXXX`.
+///
+/// Returns `None` if no illegal control characters were found inside string
+/// literals (so the caller knows the parse failure was for another reason).
+/// Existing backslash escape sequences are passed through verbatim.
+fn try_escape_control_chars(raw: &str) -> Option<String> {
+    let mut found = false;
+    let mut out = String::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            // Previous char was a backslash — emit this char verbatim.
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => {
+                out.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                in_string = !in_string;
+                out.push(ch);
+            }
+            c if in_string && (c as u32) < 0x20 => {
+                match c {
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    _ => out.push_str(&format!("\\u{:04x}", c as u32)),
+                }
+                found = true;
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    if found {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Normalize every tool_call arguments payload on an assistant message in
+/// place, immediately before it is pushed into the conversation history.
+/// See [`normalize_arguments_json`] for the rationale.
+fn normalize_message_tool_calls(message: &mut Message) {
+    if let Some(ref mut tool_calls) = message.tool_calls {
+        for tc in tool_calls.iter_mut() {
+            tc.function.arguments = normalize_arguments_json(&tc.function.arguments);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -970,6 +1091,16 @@ impl AgenticLoop for DefaultAgenticLoop {
             }
         }
 
+        // Bug H — normalize each tool_call's `arguments` into strictly-valid
+        // JSON before the message can enter history via either push path
+        // below. MiniMax re-validates every assistant.tool_calls[].function
+        // .arguments string on every outbound replay; a malformed payload
+        // (e.g. a multi-line python script with raw newlines) otherwise bricks
+        // the whole conversation with `400 invalid function arguments json
+        // string`. Done once here so both the tool-call and no-tool-call push
+        // paths see normalized arguments without re-borrowing `message`.
+        normalize_message_tool_calls(&mut message);
+
         // Check for tool calls.
         if let Some(ref tool_calls) = message.tool_calls {
             if !tool_calls.is_empty() {
@@ -1003,7 +1134,8 @@ impl AgenticLoop for DefaultAgenticLoop {
                     }
                 }
 
-                // Record the assistant message with tool calls.
+                // Record the assistant message with tool calls. Arguments
+                // were already normalized above (Bug H) before this borrow.
                 self.state.messages.push(message.clone());
 
                 // Write iteration summary to memory after tool-call dispatch.
@@ -1032,7 +1164,8 @@ impl AgenticLoop for DefaultAgenticLoop {
             }
         }
 
-        // No tool calls -- check finish reason.
+        // No tool calls -- check finish reason. Any tool_calls were already
+        // normalized above (Bug H) before this push.
         let content = message.content.clone();
         self.state.messages.push(message);
 
@@ -1196,6 +1329,115 @@ mod tests {
     use cyberclaw_llm::prelude::Stream;
     use cyberclaw_llm::types::{ChatChunk, ChatResponse, Choice, FunctionCall, ToolCall, Usage};
     use std::sync::Mutex;
+
+    // -- Bug H: tool_call arguments JSON normalization ---------------------
+
+    fn tc(args: &str) -> ToolCall {
+        ToolCall {
+            id: "call_function_001".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "cmd_run".to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn normalize_keeps_valid_json() {
+        let out = normalize_arguments_json(r#"{"a": 1, "b": "x"}"#);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], "x");
+    }
+
+    #[test]
+    fn normalize_empty_string_becomes_object() {
+        let out = normalize_arguments_json("");
+        assert_eq!(out, "{}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap();
+    }
+
+    #[test]
+    fn normalize_null_becomes_object() {
+        let out = normalize_arguments_json("null");
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
+    fn normalize_raw_newline_in_string_is_repaired() {
+        // Build arguments containing a real (unescaped) newline byte inside a
+        // JSON string value — this is what MiniMax rejects.
+        let mut raw = String::from(r#"{"script":"line1"#);
+        raw.push('\n');
+        raw.push_str(r#"line2"}"#);
+        // Sanity: the raw payload is NOT valid JSON.
+        assert!(serde_json::from_str::<serde_json::Value>(&raw).is_err());
+
+        let out = normalize_arguments_json(&raw);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("normalized must be valid JSON");
+        assert_eq!(v["script"], "line1\nline2");
+    }
+
+    #[test]
+    fn normalize_raw_tab_and_cr_repaired() {
+        let mut raw = String::from(r#"{"k":"a"#);
+        raw.push('\t');
+        raw.push('\r');
+        raw.push_str(r#"b"}"#);
+        let out = normalize_arguments_json(&raw);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["k"], "a\t\rb");
+    }
+
+    #[test]
+    fn normalize_unrepairable_degrades_to_object() {
+        // Single-quoted "JSON" is not repairable by control-char escaping.
+        let out = normalize_arguments_json("{'x': 'single'}");
+        assert_eq!(out, "{}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap();
+    }
+
+    #[test]
+    fn normalize_form_feed_and_vertical_tab_repaired() {
+        // Form feed (0x0C) and vertical tab (0x0B) are forbidden unescaped
+        // inside JSON strings (RFC 8259 §7) but can appear in multi-line
+        // script payloads. The normalizer must repair them instead of
+        // degrading to {}.
+        let mut raw = String::from(r#"{"script":"page"#);
+        raw.push('\x0c'); // form feed
+        raw.push_str("break");
+        raw.push('\x0b'); // vertical tab
+        raw.push_str(r#"end"}"#);
+        // Sanity: the raw payload is NOT valid JSON.
+        assert!(serde_json::from_str::<serde_json::Value>(&raw).is_err());
+
+        let out = normalize_arguments_json(&raw);
+        let v: serde_json::Value =
+            serde_json::from_str(&out).expect("must be valid JSON after normalize");
+        // Value should contain the escaped representation (non-empty string).
+        let script = v["script"].as_str().expect("script field present");
+        assert!(script.contains("page"), "prefix preserved");
+        assert!(script.contains("end"), "suffix preserved");
+        // Crucially the result is NOT the empty-degradation path.
+        assert_ne!(out, "{}");
+    }
+
+    #[test]
+    fn normalize_message_tool_calls_fixes_every_call() {
+        let mut bad = String::from(r#"{"script":"a"#);
+        bad.push('\n');
+        bad.push_str(r#"b"}"#);
+        let mut msg = Message::assistant_with_tools(
+            "",
+            vec![tc(&bad), tc(""), tc(r#"{"ok":true}"#)],
+        );
+        normalize_message_tool_calls(&mut msg);
+        for call in msg.tool_calls.as_ref().unwrap() {
+            serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                .expect("every tool_call arguments must be valid JSON after normalize");
+        }
+    }
 
     // -- Mock LLM Client ---------------------------------------------------
 

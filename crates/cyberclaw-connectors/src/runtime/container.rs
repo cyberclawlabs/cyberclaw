@@ -51,9 +51,18 @@ impl ContainerBackend {
     }
 
     /// Check if a specific container backend is available
+    ///
+    /// A backend counts as available only when its daemon is actually
+    /// reachable, not merely when the client binary is installed. `info`
+    /// contacts the daemon and returns non-zero when it is unreachable;
+    /// `--version` is a client-only command that succeeds even when the
+    /// daemon is down (e.g. Docker Desktop stopped, `podman machine` not
+    /// started). Probing with `--version` produced a false positive that
+    /// routed exec to a container path which then failed to launch — the
+    /// runtime should fall back to native exec instead.
     async fn is_available(backend: ContainerBackend) -> bool {
         tokio::process::Command::new(backend.command())
-            .arg("--version")
+            .arg("info")
             .output()
             .await
             .map(|output| output.status.success())

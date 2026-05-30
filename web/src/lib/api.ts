@@ -690,18 +690,51 @@ export async function compressConversation(id: string): Promise<CompressResult> 
   );
 }
 
+// v2 会话 id 是 UUID。webui 的会话列表仍走旧 /api/v1/chat/conversations，
+// 它返回 `conv_<hex>` 格式 id，**不是** v2 校验接受的 UUID。把 conv_ 喂给
+// /v2/agent/chat/completions 会被 `ConversationId::from_string` 拒绝 → HTTP 400
+// `invalid conversation id`（v1.8 Bug J）。所以只有真正的 v2 UUID 才透传给 v2，
+// 其余（conv_ 前缀 / 空）首轮一律不带 conversation_id，让服务端新建并在
+// `X-Conversation-Id` 响应头回 UUID，调用方捞回后续轮续传。
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isV2ConversationId(id: string | null | undefined): boolean {
+  return typeof id === "string" && UUID_RE.test(id);
+}
+
 // SSE streaming chat completion. onToken called per delta;
 // 错误（HTTP 非 2xx）throw ApiError；流中断 → 调用方 catch 处理。
+//
+// v1.8 Bug A: 迁到 /v2/agent/chat/completions —— 服务端持有权威会话历史
+// (skill-first constitution + IRON LAWs + conversation 语义)。请求体只发本轮
+// 最后一条 user 文本 + conversation_id；服务端从 session store 重放历史。
+//
+// v1.8 Bug J: conversationId 非 v2 UUID（webui 会话列表的 conv_ 格式 / 空）时
+// 首轮省略 conversation_id，从 `X-Conversation-Id` 响应头捞服务端新建的 UUID，
+// 经 onConversationId 回调上抛；调用方用该 UUID 续传后续轮，避免再喂 conv_ → 400。
+//
+// v2 SSE 帧是 cyberclaw-wire 的 typed envelope（非 OpenAI delta）：
+//   token:  {"v":1,"type":"token","data":{"content":"<text>"}}
+//   error:  {"v":1,"type":"error","data":{"message":"...","kind":"..."}}
+//   done:   字面量 [DONE]（无 envelope）
+// 文本内容落在 data.content。保留 OpenAI-compat delta 解析作 fallback，使该
+// 函数若误连到 /v1 也仍能取词。
 export async function streamChatCompletion(args: {
   conversationId: string;
   model: string;
   messages: ChatMessage[];
   onToken: (chunk: string) => void;
+  onConversationId?: (id: string) => void;
   signal?: AbortSignal;
 }): Promise<void> {
-  const { conversationId, model, messages, onToken, signal } = args;
+  const { conversationId, model, messages, onToken, onConversationId, signal } =
+    args;
   const jwt = getJwt();
-  const res = await fetch("/v1/chat/completions", {
+  // v2 单轮只发最后一条 user 文本；服务端 session store 持有完整历史。
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  // 仅当 conversationId 已是 v2 UUID 时透传；否则省略让服务端新建。
+  const sendConvId = isV2ConversationId(conversationId);
+  const res = await fetch("/v2/agent/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -709,13 +742,16 @@ export async function streamChatCompletion(args: {
       ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
     },
     body: JSON.stringify({
+      message: lastUser?.content ?? "",
+      ...(sendConvId ? { conversation_id: conversationId } : {}),
       model,
-      messages,
       stream: true,
-      conversation_id: conversationId,
     }),
     signal,
   });
+  // 捞服务端权威 UUID（新建或回显），回调上抛供调用方续传后续轮。
+  const v2ConvId = res.headers.get("x-conversation-id");
+  if (v2ConvId && onConversationId) onConversationId(v2ConvId);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw { status: res.status, body } satisfies ApiError;
@@ -738,10 +774,14 @@ export async function streamChatCompletion(args: {
         if (data === "[DONE]") return;
         try {
           const j = JSON.parse(data);
-          const c = j?.choices?.[0]?.delta?.content;
+          // v2 typed token frame: data.content. fallback: OpenAI delta.content。
+          // typed error frame（data.kind/message）无 content → 这里跳过，由流
+          // 末端 [DONE] 收尾；UI 仍显示空回复（服务端 LLM 调用失败时如此）。
+          const c =
+            j?.data?.content ?? j?.choices?.[0]?.delta?.content;
           if (typeof c === "string") onToken(c);
         } catch {
-          // 非 JSON / clarify 等其它帧跳过
+          // 非 JSON / keep-alive / 其它 typed frame（tool_start 等）跳过
         }
       }
     }
