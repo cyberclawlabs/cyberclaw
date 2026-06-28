@@ -88,6 +88,55 @@ const DEFAULT_STREAMING_TIMEOUT_MS: u64 = 60_000;
 #[allow(dead_code)]
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
+/// Hard ceiling for any `cmd.*` timeout. Mirrors `ProcessConfig::validate`
+/// (runtime/config.rs), which rejects timeouts greater than 600 s.
+const MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// Floor for any `cmd.*` timeout. A zero timeout would fail validation and
+/// is never a useful request.
+const MIN_TIMEOUT_MS: u64 = 1;
+
+/// Env var overriding the default `cmd.exec` / `cmd.run` / `cmd.run_powershell`
+/// timeout when the LLM does not pass an explicit `timeout_ms`. Lets operators
+/// raise the per-command budget for heavy artifact tasks (e.g. python-pptx)
+/// at server startup without recompiling. Clamped to [MIN, MAX].
+const CMD_TIMEOUT_ENV: &str = "CYBERCLAW_CMD_TIMEOUT_MS";
+
+/// Clamp any timeout (env-derived or LLM-supplied) into `[MIN, MAX]` so the
+/// downstream `ProcessConfig::validate` never rejects it.
+fn clamp_timeout_ms(ms: u64) -> u64 {
+    ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)
+}
+
+/// Resolve the effective default timeout from an optional env string.
+///
+/// Pure (does not read the environment) so it can be unit-tested without
+/// touching global process state. Precedence and fallback policy:
+/// a present, well-formed value wins (clamped); anything else falls back to
+/// the hardcoded `DEFAULT_TIMEOUT_MS`.
+fn resolve_timeout(env_val: Option<&str>) -> u64 {
+    match env_val {
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(ms) => clamp_timeout_ms(ms),
+            Err(_) => {
+                warn!(
+                    env = CMD_TIMEOUT_ENV,
+                    value = s,
+                    "malformed timeout value; falling back to default {}ms",
+                    DEFAULT_TIMEOUT_MS
+                );
+                DEFAULT_TIMEOUT_MS
+            }
+        },
+        None => DEFAULT_TIMEOUT_MS,
+    }
+}
+
+/// Read [`CMD_TIMEOUT_ENV`] and resolve the effective default timeout.
+fn default_cmd_timeout_ms() -> u64 {
+    resolve_timeout(std::env::var(CMD_TIMEOUT_ENV).ok().as_deref())
+}
+
 // ---------------------------------------------------------------------------
 // §4 Facade export — real cyberclaw_core::facade types (Phase 2)
 // ---------------------------------------------------------------------------
@@ -130,7 +179,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                         },
                         "timeout_ms": {
                             "type": "integer",
-                            "description": "Timeout in milliseconds (default 30000)"
+                            "description": "Timeout in milliseconds (default: CYBERCLAW_CMD_TIMEOUT_MS env or 30000; clamped to max 600000)"
                         },
                         "env": {
                             "type": "object",
@@ -216,7 +265,7 @@ pub fn capability_facades() -> Vec<(CapabilityFacade, ToolsetCategory)> {
                         },
                         "timeout_ms": {
                             "type": "integer",
-                            "description": "Timeout in milliseconds (default 30000)"
+                            "description": "Timeout in milliseconds (default: CYBERCLAW_CMD_TIMEOUT_MS env or 30000; clamped to max 600000)"
                         },
                         "env": {
                             "type": "object",
@@ -501,7 +550,8 @@ pub async fn exec(
         connector.resolve_agent_workspace(&actor)
     };
 
-    let timeout_duration = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let timeout_ms = clamp_timeout_ms(input.timeout_ms.unwrap_or_else(default_cmd_timeout_ms));
+    let timeout_duration = Duration::from_millis(timeout_ms);
 
     // Sprint 19 W4 — when a ContainerRuntime is wired (operator opted
     // into Container isolation via `LocalConnector::with_container_runtime`),
@@ -517,8 +567,7 @@ pub async fn exec(
         // the sandbox profile, not inline here. `cmd.exec` is whitelisted
         // and historically had NetworkMode::None → use `isolated`.
         let profile = SandboxProfile::isolated();
-        let cap_shim =
-            cmd_capability_shim("cmd.exec", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let cap_shim = cmd_capability_shim("cmd.exec", timeout_ms);
         let effective = profile
             .validate_and_resolve(&cap_shim)
             .map_err(|e| anyhow::anyhow!("sandbox profile resolve failed: {}", e))?;
@@ -664,7 +713,7 @@ pub async fn run(
         connector.workspace.clone()
     };
 
-    let timeout_ms = input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+    let timeout_ms = clamp_timeout_ms(input.timeout_ms.unwrap_or_else(default_cmd_timeout_ms));
     let timeout_duration = Duration::from_millis(timeout_ms);
 
     // v1.0-rc13 SECURITY: route cmd.run through ContainerRuntime when wired.
@@ -690,8 +739,7 @@ pub async fn run(
         // all come from the profile — no inline ContainerConfig assembly
         // that could collide with the runtime's implicit `--tmpfs /tmp`.
         let profile = SandboxProfile::dev();
-        let cap_shim =
-            cmd_capability_shim("cmd.run", input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let cap_shim = cmd_capability_shim("cmd.run", timeout_ms);
         let effective = profile
             .validate_and_resolve(&cap_shim)
             .map_err(|e| anyhow::anyhow!("sandbox profile resolve failed: {}", e))?;
@@ -1115,7 +1163,7 @@ pub async fn run_powershell(
         connector.workspace.clone()
     };
 
-    let timeout_ms = input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+    let timeout_ms = clamp_timeout_ms(input.timeout_ms.unwrap_or_else(default_cmd_timeout_ms));
 
     // R3 (2026-05-21) — pwsh is not bundled in the default `python:3.12-slim`
     // container image, so this capability cannot dispatch into the
@@ -1237,6 +1285,36 @@ mod tests {
 
     fn make_connector(tmp: &TempDir) -> LocalConnector {
         LocalConnector::new(tmp.path().to_path_buf())
+    }
+
+    // --- cmd.* timeout resolution (env-configurable default + clamp) --------
+
+    #[test]
+    fn clamp_timeout_clamps_floor_ceiling_and_passthrough() {
+        assert_eq!(clamp_timeout_ms(0), MIN_TIMEOUT_MS);
+        assert_eq!(clamp_timeout_ms(700_000), MAX_TIMEOUT_MS);
+        assert_eq!(clamp_timeout_ms(45_000), 45_000);
+    }
+
+    #[test]
+    fn resolve_timeout_falls_back_when_env_absent() {
+        assert_eq!(resolve_timeout(None), DEFAULT_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn resolve_timeout_uses_valid_env_value() {
+        assert_eq!(resolve_timeout(Some("120000")), 120_000);
+    }
+
+    #[test]
+    fn resolve_timeout_clamps_out_of_range_env_value() {
+        assert_eq!(resolve_timeout(Some("999999")), MAX_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn resolve_timeout_falls_back_on_malformed_env_value() {
+        assert_eq!(resolve_timeout(Some("abc")), DEFAULT_TIMEOUT_MS);
+        assert_eq!(resolve_timeout(Some("")), DEFAULT_TIMEOUT_MS);
     }
 
     fn make_request(

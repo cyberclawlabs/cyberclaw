@@ -5,6 +5,29 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) fo
 
 ---
 
+## [v1.8.1] — 2026-06-28
+
+The default per-command timeout for the host command tools is now configurable, so long artifact-generation commands (for example installing a Python package and rendering a multi-slide deck inside a container) are no longer cut off by the previous fixed 30-second limit.
+
+### What's new for users
+
+- **Configurable command timeout.** The `cmd.exec`, `cmd.run`, and `cmd.run_powershell` capabilities previously defaulted to a fixed 30-second timeout when the model did not specify one. You can now override that default at server startup with the `CYBERCLAW_CMD_TIMEOUT_MS` environment variable. This unblocks heavy, legitimate commands — such as `pip install python-pptx && python build_deck.py` — that routinely take longer than 30 seconds, without forcing the model to pass an explicit timeout on every call.
+- **Safe by default, bounded by design.** When `CYBERCLAW_CMD_TIMEOUT_MS` is not set, the default stays 30 seconds, so existing deployments behave exactly as before. The effective timeout — whether it comes from the environment variable or from an explicit per-call value — is clamped to a hard ceiling of 600 seconds (10 minutes), matching the process runtime's existing validation bound. Streaming commands (`cmd.run_streaming`) keep their separate 60-second default and are unaffected.
+
+### Quality gates
+
+- `cargo build --release --workspace`: clean (0 warnings).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo test --workspace --lib`: 4,139 pass / 0 fail / 17 suites.
+- `npm --prefix web run typecheck`: clean.
+
+### Migration
+
+- No API changes — drop-in upgrade.
+- Default behavior is unchanged unless you set `CYBERCLAW_CMD_TIMEOUT_MS`. To allow longer commands, export it (in milliseconds) before starting the server, e.g. `CYBERCLAW_CMD_TIMEOUT_MS=120000` for a 2-minute ceiling.
+
+---
+
 ## [v1.8.0] — 2026-05-30
 
 Anthropic-compatible providers now support the full agentic loop — tool calling and live streaming — plus reliability fixes for long multi-tool tasks, the terminal UI, and container runtime detection. Rolls up the v1.7.x reliability patch.

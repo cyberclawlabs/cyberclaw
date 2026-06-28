@@ -73,6 +73,14 @@
 - **描述**: LLM API 基础 URL
 - **示例**: `export LLM_BASE_URL="https://api.anthropic.com/v1"`
 
+## 运行时执行 (Runtime Execution)
+
+### CYBERCLAW_CMD_TIMEOUT_MS
+- **必需性**: 可选
+- **默认值**: `30000`（30 秒）
+- **描述**: `cmd.exec` / `cmd.run` / `cmd.run_powershell` 命令工具在模型未显式指定超时时使用的默认超时（毫秒）。用于放宽重型产物生成命令（如容器内 `pip install python-pptx && python build_deck.py`）的时间预算。每次调用显式传入的 `timeout_ms` 优先级更高。有效值（无论来自本变量还是逐调用）会被钳制到上限 600000 毫秒（10 分钟）。流式命令 `cmd.run_streaming` 有独立的 60 秒默认，不受本变量影响。
+- **示例**: `export CYBERCLAW_CMD_TIMEOUT_MS=120000`
+
 ## 生产环境配置示例
 
 ```bash
