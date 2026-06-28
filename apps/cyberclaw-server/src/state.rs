@@ -1464,7 +1464,12 @@ fn ecosystem_skills_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from);
     let candidates = [
         from_env.map(|p| p.join("skills")),
+        // Dev-layout manifest fallback, debug-only so release binaries don't
+        // embed the build machine's absolute manifest path.
+        #[cfg(debug_assertions)]
         Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ecosystem/skills")),
+        #[cfg(not(debug_assertions))]
+        None,
         std::env::current_dir()
             .ok()
             .map(|p| p.join("ecosystem").join("skills")),

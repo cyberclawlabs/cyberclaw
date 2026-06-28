@@ -129,7 +129,19 @@ fn config_path() -> std::path::PathBuf {
     if let Ok(path) = std::env::var("CYBERCLAW_CONFIG_PATH") {
         return std::path::PathBuf::from(path);
     }
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml")
+    // Dev convenience: config.toml next to the crate manifest. Gated to debug
+    // builds so the shipped release binary never embeds the build machine's
+    // absolute manifest path (env!("CARGO_MANIFEST_DIR") resolves at compile
+    // time; --remap-path-prefix does not touch it). Release falls back to a
+    // CWD-relative path.
+    #[cfg(debug_assertions)]
+    {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        std::path::PathBuf::from("config.toml")
+    }
 }
 
 /// `GET /api/v1/settings/config` — return the server's TOML config body.

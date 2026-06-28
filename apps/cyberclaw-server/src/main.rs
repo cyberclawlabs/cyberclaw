@@ -191,7 +191,12 @@ async fn maybe_start_raft_consensus() -> Result<Option<ConsensusRuntimeHandle>> 
 async fn bootstrap_registry_from_ecosystem(
     registry: Arc<cyberclaw_control_plane::registry::InMemoryRegistry>,
 ) -> Result<()> {
+    // Dev-layout default gated to debug builds so release binaries don't embed
+    // the build machine's absolute manifest path; release falls back to CWD.
+    #[cfg(debug_assertions)]
     let default_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ecosystem");
+    #[cfg(not(debug_assertions))]
+    let default_path = std::path::PathBuf::from("ecosystem");
     let ecosystem_path = env::var("CYBERCLAW_ECOSYSTEM_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or(default_path);
@@ -732,10 +737,15 @@ async fn main() -> Result<()> {
             // Mirrors the order in `to_admin_view_with_base` in skills.rs.
             let ecosystem_dirs: Vec<std::path::PathBuf> = [
                 std::env::var_os("CYBERCLAW_ECOSYSTEM_SKILLS").map(std::path::PathBuf::from),
+                // Dev-layout manifest fallback, debug-only so release binaries
+                // don't embed the build machine's absolute manifest path.
+                #[cfg(debug_assertions)]
                 Some(
                     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                         .join("../../ecosystem/skills"),
                 ),
+                #[cfg(not(debug_assertions))]
+                None,
                 std::env::current_dir()
                     .ok()
                     .map(|p| p.join("ecosystem/skills")),
